@@ -10,6 +10,9 @@ log in `docs/`.
 |---|------|-------|--------|----------|--------|----------|
 | 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
 | 002 | [Obby World](https://github.com/cykgames/002-obby) | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.0](https://github.com/cykgames/002-obby/releases/download/v0.2.0/002-obby-v0.2.0.apk) |
+| 003 | [Space Shooter](https://github.com/cykgames/003-shmup) | arcade | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/003-shmup/releases/download/v0.1.0/003-shmup-v0.1.0.apk) |
+| 004 | [Match3](https://github.com/cykgames/004-match3) | puzzle | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/004-match3/releases/download/v0.1.0/004-match3-v0.1.0.apk) |
+| 005 | [Marble Runner](https://github.com/cykgames/005-marble) | roller | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/005-marble/releases/download/v0.1.0/005-marble-v0.1.0.apk) |
 
 ### 001 · Voxel Parkour
 
@@ -28,6 +31,30 @@ pads, vanishing blocks, rotating bars and ice. Character & decorations from
 Kenney's CC0 Starter Kit 3D Platformer.
 
 <img src="https://raw.githubusercontent.com/cykgames/002-obby/main/docs/screenshots/volcano_gameplay.png" width="240">
+
+### 003 · Space Shooter
+
+Top-down arcade shmup: floating joystick, autofire with auto-aim, overheat /
+reload energy cycle, enemies, meteors and pickups. Touch port of
+acfaruk/gd-space-shooter (MIT); Kenney CC0 art, procedural BGM.
+
+<img src="https://raw.githubusercontent.com/cykgames/003-shmup/main/docs/screenshots/gameplay.png" width="240">
+
+### 004 · Match3
+
+Halloween match-3 puzzle: drag adjacent pieces to match 3+, cascades and
+combos, levels, shuffle; portrait and touch-first. From luiz734/match3_game
+(MIT); author-owned art, OFL font.
+
+<img src="https://raw.githubusercontent.com/cykgames/004-match3/main/docs/screenshots/gameplay.png" width="240">
+
+### 005 · Marble Runner
+
+Torque-driven marble roller: 60 courses in the sky, gems / stars /
+checkpoints, powerups and a shop; drag the left half to roll, JUMP button.
+From kaushalmeena/marble-runner (MIT); fully procedural assets, OFL font.
+
+<img src="https://raw.githubusercontent.com/cykgames/005-marble/main/docs/screenshots/gameplay.png" width="240">
 
 ## Conventions
 
