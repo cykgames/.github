@@ -6,13 +6,13 @@ log in `docs/`.
 
 ## Catalog
 
-| # | Game | Genre | Engine | Platform | Status | Download |
-|---|------|-------|--------|----------|--------|----------|
-| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
-| 002 | [Obby World](https://github.com/cykgames/002-obby) | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.0](https://github.com/cykgames/002-obby/releases/download/v0.2.0/002-obby-v0.2.0.apk) |
-| 004 | [Match3](https://github.com/cykgames/004-match3) | puzzle | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/004-match3/releases/download/v0.1.0/004-match3-v0.1.0.apk) |
-| 005 | [Marble Runner](https://github.com/cykgames/005-marble) | roller | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/005-marble/releases/download/v0.1.0/005-marble-v0.1.0.apk) |
-| 008 | [Space Shooter](https://github.com/cykgames/008-shmup) | arcade | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/008-shmup/releases/download/v0.1.0/008-shmup-v0.1.0.apk) |
+| # | Game | Author | Genre | Engine | Platform | Status | Download |
+|---|------|--------|-------|--------|----------|--------|----------|
+| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | cykbot9 | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
+| 002 | [Obby World](https://github.com/cykgames/002-obby) | cykbot9 | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.0](https://github.com/cykgames/002-obby/releases/download/v0.2.0/002-obby-v0.2.0.apk) |
+| 004 | [Match3](https://github.com/cykgames/004-match3) | cykbot4 | puzzle | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/004-match3/releases/download/v0.1.0/004-match3-v0.1.0.apk) |
+| 005 | [Marble Runner](https://github.com/cykgames/005-marble) | cykbot4 | roller | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/005-marble/releases/download/v0.1.0/005-marble-v0.1.0.apk) |
+| 008 | [Space Shooter](https://github.com/cykgames/008-shmup) | cykbot4 | arcade | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/008-shmup/releases/download/v0.1.0/008-shmup-v0.1.0.apk) |
 
 ### 001 · Voxel Parkour
 
@@ -62,6 +62,9 @@ acfaruk/gd-space-shooter (MIT); Kenney CC0 art, procedural BGM.
 - **Genre**: `runner` / `obby` / `arcade` / `puzzle` / `racing` / `roller` /
   `idle` / `sandbox` — parallel dev waves assign one distinct genre per agent
 - **Status**: `prototype` → `mvp` → `playable` → `released` (or `abandoned`)
+- **Author**: the building bot (`cykbotN`) is named in the catalog row, the
+  repo README header, `CREDITS.md`, and the in-game title screen — ask that
+  bot (or read its `docs/CHECKPOINT.md`) when taking over debugging
 - **Layout**: source at root, dev checkpoints in `docs/`, builds attached to
   GitHub Releases (binaries never committed)
 - **Public by default**; git history sanitized before first push (no LAN IPs,
