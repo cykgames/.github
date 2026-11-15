@@ -9,7 +9,7 @@ log in `docs/`.
 | # | Game | Genre | Engine | Platform | Status | Download |
 |---|------|-------|--------|----------|--------|----------|
 | 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
-| 002 | [Obby World](https://github.com/cykgames/002-obby) | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/002-obby/releases/download/v0.1.0/002-obby-v0.1.0.apk) |
+| 002 | [Obby World](https://github.com/cykgames/002-obby) | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.0](https://github.com/cykgames/002-obby/releases/download/v0.2.0/002-obby-v0.2.0.apk) |
 
 ### 001 · Voxel Parkour
 
@@ -22,12 +22,12 @@ assets — terrain, SFX and music are all procedural.
 ### 002 · Obby World
 
 Roblox-style block obstacle course: omnidirectional joystick + double jump,
-12 levels across 3 worlds (Meadow / Canyon / Frost), checkpoints, coins, par
-times, 3-star ratings and sequential unlock. Moving platforms, lava, bounce
+16 levels across 4 worlds (Meadow / Canyon / Frost / Volcano), checkpoints,
+coins, par times, 3-star ratings and sequential unlock. Moving platforms, lava, bounce
 pads, vanishing blocks, rotating bars and ice. Character & decorations from
 Kenney's CC0 Starter Kit 3D Platformer.
 
-<img src="https://raw.githubusercontent.com/cykgames/002-obby/main/docs/screenshots/level_clear.png" width="240">
+<img src="https://raw.githubusercontent.com/cykgames/002-obby/main/docs/screenshots/volcano_gameplay.png" width="240">
 
 ## Conventions
 
