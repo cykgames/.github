@@ -32,8 +32,8 @@ Kenney's CC0 Starter Kit 3D Platformer.
 ## Conventions
 
 - **Repo name**: `NNN-slug` — zero-padded serial + short slug (`001-parkour`, `002-...`)
-- **Genre**: `runner` / `obby` / `arcade` / `puzzle` / `racing` / `idle` /
-  `sandbox` — parallel dev waves assign one distinct genre per agent
+- **Genre**: `runner` / `obby` / `arcade` / `puzzle` / `racing` / `roller` /
+  `idle` / `sandbox` — parallel dev waves assign one distinct genre per agent
 - **Status**: `prototype` → `mvp` → `playable` → `released` (or `abandoned`)
 - **Layout**: source at root, dev checkpoints in `docs/`, builds attached to
   GitHub Releases (binaries never committed)
