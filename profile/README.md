@@ -6,10 +6,10 @@ log in `docs/`.
 
 ## Catalog
 
-| # | Game | Engine | Platform | Status | Download |
-|---|------|--------|----------|--------|----------|
-| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
-| 002 | [Obby World](https://github.com/cykgames/002-obby) | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/002-obby/releases/download/v0.1.0/002-obby-v0.1.0.apk) |
+| # | Game | Genre | Engine | Platform | Status | Download |
+|---|------|-------|--------|----------|--------|----------|
+| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/001-parkour/releases/download/v0.1.0/godot-parkour-v0.1.0.apk) |
+| 002 | [Obby World](https://github.com/cykgames/002-obby) | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.0](https://github.com/cykgames/002-obby/releases/download/v0.1.0/002-obby-v0.1.0.apk) |
 
 ### 001 · Voxel Parkour
 
@@ -32,6 +32,8 @@ Kenney's CC0 Starter Kit 3D Platformer.
 ## Conventions
 
 - **Repo name**: `NNN-slug` — zero-padded serial + short slug (`001-parkour`, `002-...`)
+- **Genre**: `runner` / `obby` / `arcade` / `puzzle` / `racing` / `idle` /
+  `sandbox` — parallel dev waves assign one distinct genre per agent
 - **Status**: `prototype` → `mvp` → `playable` → `released` (or `abandoned`)
 - **Layout**: source at root, dev checkpoints in `docs/`, builds attached to
   GitHub Releases (binaries never committed)
