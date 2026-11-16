@@ -366,7 +366,7 @@ def _valid_sample(d):
     if not isinstance(d.get("running"), bool):
         return False
     t = d.get("time")
-    if not _finite_num(t) or t < -1e-9:
+    if not _finite_num(t) or t < 0:
         return False
     st = d.get("stick")
     if not (isinstance(st, list) and len(st) == 2
@@ -531,7 +531,11 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
                 cur = []
             continue
         if s.get("running") is True and _stick_mag(s) >= peak_min:
-            if cur and float(s["ts"]) - float(cur[-1]["ts"]) > 0.6 + 1e-9:
+            # epoch-scale float tolerance: at unix ~1.76e9 the ULP is ~2.4e-7,
+            # so a legal 0.6s spacing can compute as 0.60000014 -- a fixed
+            # 1e-9 tolerance would falsely break the segment.
+            gap_tol = 0.6 + max(1e-9, 8.0 * math.ulp(float(s["ts"])))
+            if cur and float(s["ts"]) - float(cur[-1]["ts"]) > gap_tol:
                 segs.append(cur)
                 cur = []
             cur.append(s)
@@ -1074,7 +1078,7 @@ def main():
             if args.skip_bump:
                 ver, code = read_version(repo)
             else:
-                cfg_backup = cfg_path.read_text(encoding="utf-8", errors="replace")
+                cfg_backup = cfg_path.read_bytes()
                 ver, code = bump_patch(repo)
             rec.update(version=ver, version_code=code)
             tag = f"v{ver}"
@@ -1147,8 +1151,10 @@ def main():
                     log(f"  rollback: git reset raised "
                         f"{type(re).__name__}: {re}")
                 try:
-                    cfg_path.write_text(cfg_backup, encoding="utf-8")
-                    if cfg_path.read_bytes() != cfg_backup.encode("utf-8"):
+                    # raw bytes restore: read_text/write_text would normalize
+                    # CRLF on Windows and make the read-back compare lie.
+                    cfg_path.write_bytes(cfg_backup)
+                    if cfg_path.read_bytes() != cfg_backup:
                         log("  rollback FAILED: read-back mismatch")
                     else:
                         log("  rollback: export_presets.cfg restored to pre-bump")
