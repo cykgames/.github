@@ -8,15 +8,15 @@ log in `docs/`.
 
 | # | Game | Author | Genre | Engine | Platform | Status | Download |
 |---|------|--------|-------|--------|----------|--------|----------|
-| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | cykbot9 | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.3](https://github.com/cykgames/001-parkour/releases/download/v0.1.3/001-parkour-v0.1.3.apk) |
-| 002 | [Obby World](https://github.com/cykgames/002-obby) | cykbot9 | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.3](https://github.com/cykgames/002-obby/releases/download/v0.2.3/002-obby-v0.2.3.apk) |
-| 003 | [Outpost Assault](https://github.com/cykgames/003-outpost) | cykbot12 | tower-defense | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.2](https://github.com/cykgames/003-outpost/releases/download/v0.1.2/003-outpost-v0.1.2.apk) |
-| 004 | [Match3](https://github.com/cykgames/004-match3) | cykbot4 | puzzle | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.1](https://github.com/cykgames/004-match3/releases/download/v0.1.1/004-match3-v0.1.1.apk) |
-| 005 | [Marble Runner](https://github.com/cykgames/005-marble) | cykbot4 | roller | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.2](https://github.com/cykgames/005-marble/releases/download/v0.1.2/005-marble-v0.1.2.apk) |
-| 006 | [Tomb Explorer](https://github.com/cykgames/006-tomb) | cykbot7 | adventure | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.2](https://github.com/cykgames/006-tomb/releases/download/v0.1.2/006-tomb-v0.1.2.apk) |
-| 007 | [Fruit Merge](https://github.com/cykgames/007-merge) | cykbot6 | puzzle | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.1](https://github.com/cykgames/007-merge/releases/download/v0.1.1/007-merge-v0.1.1.apk) |
-| 008 | [Space Shooter](https://github.com/cykgames/008-shmup) | cykbot4 | arcade | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.1](https://github.com/cykgames/008-shmup/releases/download/v0.1.1/008-shmup-v0.1.1.apk) |
-| 009 | [CykShooter](https://github.com/cykgames/009-shooter) | cykbot1 | shooter | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.2](https://github.com/cykgames/009-shooter/releases/download/v0.1.2/009-shooter-v0.1.2.apk) |
+| 001 | [Voxel Parkour](https://github.com/cykgames/001-parkour) | cykbot9 | runner | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.4](https://github.com/cykgames/001-parkour/releases/download/v0.1.4/001-parkour-v0.1.4.apk) |
+| 002 | [Obby World](https://github.com/cykgames/002-obby) | cykbot9 | obby | Godot 4.7.2 | Android (arm64) | playable | [APK v0.2.4](https://github.com/cykgames/002-obby/releases/download/v0.2.4/002-obby-v0.2.4.apk) |
+| 003 | [Outpost Assault](https://github.com/cykgames/003-outpost) | cykbot12 | tower-defense | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.3](https://github.com/cykgames/003-outpost/releases/download/v0.1.3/003-outpost-v0.1.3.apk) |
+| 004 | [Match3](https://github.com/cykgames/004-match3) | cykbot4 | puzzle | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.2](https://github.com/cykgames/004-match3/releases/download/v0.1.2/004-match3-v0.1.2.apk) |
+| 005 | [Marble Runner](https://github.com/cykgames/005-marble) | cykbot4 | roller | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.3](https://github.com/cykgames/005-marble/releases/download/v0.1.3/005-marble-v0.1.3.apk) |
+| 006 | [Tomb Explorer](https://github.com/cykgames/006-tomb) | cykbot7 | adventure | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.3](https://github.com/cykgames/006-tomb/releases/download/v0.1.3/006-tomb-v0.1.3.apk) |
+| 007 | [Fruit Merge](https://github.com/cykgames/007-merge) | cykbot6 | puzzle | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.2](https://github.com/cykgames/007-merge/releases/download/v0.1.2/007-merge-v0.1.2.apk) |
+| 008 | [Space Shooter](https://github.com/cykgames/008-shmup) | cykbot4 | arcade | Godot 4.7.2 | Android (arm64) | playable | [APK v0.1.2](https://github.com/cykgames/008-shmup/releases/download/v0.1.2/008-shmup-v0.1.2.apk) |
+| 009 | [CykShooter](https://github.com/cykgames/009-shooter) | cykbot1 | shooter | Godot 4.7.2 | Android (arm64) | prototype | [APK v0.1.3](https://github.com/cykgames/009-shooter/releases/download/v0.1.3/009-shooter-v0.1.3.apk) |
 
 ### 001 · Voxel Parkour
 
