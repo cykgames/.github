@@ -125,6 +125,15 @@ def run(cmd, cwd=None, timeout=900, check=False):
     return p.returncode, out
 
 
+def run_split(cmd, cwd=None, timeout=120):
+    """Like run() but keeps stdout and stderr SEPARATE (review r14 I18:
+    existence queries must not mistake a stderr warning for a ref)."""
+    p = subprocess.run([str(c) for c in cmd], cwd=str(cwd) if cwd else None,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=timeout)
+    return p.returncode, p.stdout or "", p.stderr or ""
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -945,14 +954,22 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
     # NEVER silently replace an existing public release: the tag and the
     # release must both be new. Replacing an existing release requires an
     # explicit manual workflow (remove it first), not a harness side effect.
-    _, out = run(["git", "tag", "-l", tag], cwd=d)
+    # review r14 (sol I17/I18, luna): existence queries must check rc (a failed
+    # query is UNKNOWN, not "absent") and read stdout only (a stderr warning is
+    # not a ref).
+    rc, out, _err = run_split(["git", "tag", "-l", tag], cwd=d)
+    if rc != 0:
+        raise ReleaseError(f"cannot verify local tag {tag} (rc={rc}) -- refusing publish")
     if out.strip():
         raise ReleaseError(f"tag {tag} already exists locally -- refusing to "
                            "replace an existing release (explicit force "
                            "workflow required)")
-    _, out = run(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
-                 cwd=d, timeout=120)
-    if out.strip():
+    rc, out, _err = run_split(["git", "ls-remote", "--tags", "origin",
+                               f"refs/tags/{tag}"], cwd=d, timeout=120)
+    if rc != 0:
+        raise ReleaseError(f"cannot verify remote tag {tag} (rc={rc}) -- refusing publish")
+    want = f"refs/tags/{tag}"
+    if any(ln.split("\t")[-1].strip() == want for ln in out.splitlines() if ln.strip()):
         raise ReleaseError(f"tag {tag} already exists on origin -- refusing to "
                            "replace an existing release (explicit force "
                            "workflow required)")
