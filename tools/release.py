@@ -297,16 +297,22 @@ def restore_index(repo, entry):
     nothing when untracked). Never substitute a reset-to-HEAD."""
     d = PROJECTS / repo
     if entry is None:
+        # Absence must be GUARANTEED, not inferred from HEAD: read the
+        # current index, force-remove any entry (worktree untouched), and
+        # read back. Any git read failure is a failure, never success.
         rcC, outC = run(["git", "ls-files", "-s", "export_presets.cfg"], cwd=d)
-        if rcC == 0 and not outC.strip():
+        if rcC != 0:
+            return False, f"ls-files read failed rc={rcC}"
+        if not outC.strip():
             return True, "absent-entry preserved"
-        rcH, _ = run(["git", "cat-file", "-e", "HEAD:export_presets.cfg"], cwd=d)
-        if rcH == 0:
-            rc, out = run(["git", "rm", "--cached", "-q", "--",
-                           "export_presets.cfg"], cwd=d)
-            if rc != 0:
-                return False, f"rm --cached rc={rc}: {out.strip()[-150:]}"
-        return True, "absent-entry preserved"
+        rc, out = run(["git", "update-index", "--force-remove",
+                       "export_presets.cfg"], cwd=d)
+        if rc != 0:
+            return False, f"force-remove rc={rc}: {out.strip()[-150:]}"
+        rc2, out2 = run(["git", "ls-files", "-s", "export_presets.cfg"], cwd=d)
+        if rc2 != 0 or out2.strip():
+            return False, f"absent read-back failed: {out2.strip()!r}"
+        return True, "absent-entry restored (verified)"
     rc, out = run(["git", "update-index", "--cacheinfo",
                    f"{entry['mode']},{entry['oid']},export_presets.cfg"], cwd=d)
     if rc != 0:
@@ -1096,6 +1102,12 @@ def main():
             ap.error(f"unknown repo {r}")
     if args.publish and args.skip_build:
         ap.error("--publish never reuses a stale build")
+    if args.publish and args.skip_tests:
+        ap.error("--publish requires the headless test gate (no --skip-tests)")
+    if args.publish and args.skip_bump:
+        ap.error("--publish requires a fresh version bump (no --skip-bump); "
+                 "replacing an existing public release needs an explicit "
+                 "force workflow, not a silent asset swap")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = Path(args.report_dir) if args.report_dir else (
