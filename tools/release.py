@@ -508,14 +508,21 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
         f"peak={peak:.3f} running_samples_above_threshold={active}")
 
     # displacement must happen INSIDE a continuous active-input segment,
-    # and (when drags are known) inside an injection window. Motion during
-    # a neutral gap between two active segments is NOT input evidence
-    # (no cross-segment stitching).
+    # and (when drags are known) inside the uncertainty-shrunk injection
+    # window interior. Segmentation runs on the FULL ordered series: a
+    # non-play sample, running=false, stick below peak, or a sampling gap
+    # all flush the current segment -- motion during a neutral/non-running
+    # gap can never be stitched into "input evidence".
     peak_min = float(spec["stick_peak_min"])
     segs, cur = [], []
-    for s in running:
-        if _stick_mag(s) >= peak_min:
-            if cur and float(s["ts"]) - float(cur[-1]["ts"]) > 0.6:
+    for s in samples:
+        if s.get("scene") != "play":
+            if cur:
+                segs.append(cur)
+                cur = []
+            continue
+        if s.get("running") is True and _stick_mag(s) >= peak_min:
+            if cur and float(s["ts"]) - float(cur[-1]["ts"]) > 0.6 + 1e-9:
                 segs.append(cur)
                 cur = []
             cur.append(s)
@@ -533,12 +540,13 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
     if drags:
         best = 0.0
         for (t0, t1) in drags:
+            lo, hi = t0 + unc, t1 - unc
             for seg in segs:
-                inside = [s for s in seg if t0 <= float(s["ts"]) <= t1]
+                inside = [s for s in seg if lo <= float(s["ts"]) <= hi]
                 if len(inside) >= 2:
                     best = max(best, seg_excursion(inside))
         add("player_displacement", best >= float(spec["pos_delta_min"]),
-            f"max within-drag active-segment excursion={best:.2f}")
+            f"max within-drag-interior active-segment excursion={best:.2f}")
     elif segs:
         qualifying = [seg for seg in segs if len(seg) >= 2]
         best = max((seg_excursion(seg) for seg in qualifying), default=0.0)
