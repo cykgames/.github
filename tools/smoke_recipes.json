@@ -1,0 +1,96 @@
+{
+  "_doc": "Smoke recipes for tools/release.py. Coordinates are FRACTIONS of the live screen (x/w, y/h) so the same recipe works on any device size. Each recipe must end with shots named gp1 and gp2 taken INSIDE gameplay, with something that moves between them (HUD timer/score or world motion). launch_wait = seconds between monkey launch and the first observation.",
+  "001-parkour": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.5, 0.802], "wait": 3.0},
+      {"shot": "gp1"},
+      {"wait": 3.5},
+      {"shot": "gp2"}
+    ]
+  },
+  "002-obby": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.151, 0.388], "wait": 4.0},
+      {"drag": [[0.141, 0.872], [0.24, 0.80]], "hold": 1.2, "wait": 0.6},
+      {"shot": "gp1"},
+      {"drag": [[0.141, 0.872], [0.141, 0.75]], "hold": 0.4, "wait": 1.5},
+      {"drag": [[0.24, 0.872], [0.141, 0.80]], "hold": 1.2, "wait": 1.0},
+      {"shot": "gp2"}
+    ]
+  },
+  "003-outpost": {
+    "launch_wait": 10,
+    "steps": [
+      {"tap": [0.502, 0.572], "wait": 6.0},
+      {"shot": "gp1"},
+      {"drag": [[0.598, 0.5], [0.427, 0.37]], "hold": 0.4, "wait": 3.0},
+      {"shot": "gp2"}
+    ]
+  },
+  "004-match3": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.499, 0.497], "wait": 3.0},
+      {"shot": "gp1"},
+      {"tap": [0.37, 0.513], "wait": 0.6},
+      {"tap": [0.5, 0.513], "wait": 1.2},
+      {"tap": [0.5, 0.60], "wait": 0.6},
+      {"tap": [0.5, 0.686], "wait": 1.5},
+      {"shot": "gp2"}
+    ]
+  },
+  "005-marble": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.499, 0.598], "wait": 5.0},
+      {"shot": "gp1"},
+      {"drag": [[0.278, 0.727], [0.463, 0.641]], "hold": 1.5, "wait": 1.5},
+      {"shot": "gp2"}
+    ]
+  },
+  "006-tomb": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.2685, 0.4564], "wait": 4.5},
+      {"drag": [[0.135, 0.872], [0.24, 0.80]], "hold": 1.2, "wait": 0.6},
+      {"shot": "gp1"},
+      {"drag": [[0.135, 0.872], [0.135, 0.75]], "hold": 0.4, "wait": 1.5},
+      {"drag": [[0.24, 0.872], [0.135, 0.80]], "hold": 1.2, "wait": 1.0},
+      {"shot": "gp2"}
+    ]
+  },
+  "007-merge": {
+    "launch_wait": 9,
+    "_note": "the merge board is also the title art, so title->board looks similar: menu_diff_min relaxed",
+    "menu_diff_min": 0.010,
+    "steps": [
+      {"tap": [0.5, 0.385], "wait": 1.3},
+      {"tap": [0.40, 0.385], "wait": 1.3},
+      {"shot": "gp1"},
+      {"tap": [0.60, 0.385], "wait": 1.3},
+      {"tap": [0.45, 0.385], "wait": 1.8},
+      {"shot": "gp2"}
+    ]
+  },
+  "008-shmup": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.499, 0.6838], "wait": 4.0},
+      {"shot": "gp1"},
+      {"drag": [[0.213, 0.812], [0.278, 0.769]], "hold": 1.5, "wait": 1.2},
+      {"shot": "gp2"}
+    ]
+  },
+  "009-shooter": {
+    "launch_wait": 9,
+    "steps": [
+      {"tap": [0.5017, 0.6806], "wait": 6.0},
+      {"shot": "gp1"},
+      {"drag": [[0.137, 0.768], [0.171, 0.722]], "hold": 1.2, "wait": 0.5},
+      {"drag": [[0.834, 0.768], [0.868, 0.741]], "hold": 1.2, "wait": 1.0},
+      {"shot": "gp2"}
+    ]
+  }
+}
