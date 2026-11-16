@@ -11,6 +11,14 @@
   },
   "002-obby": {
     "launch_wait": 9,
+    "state_assert": {
+      "require_running": true,
+      "time_increase_min": 2.0,
+      "stick_peak_min": 0.3,
+      "pos_delta_min": 0.5,
+      "stick_settle_max": 0.2
+    },
+    "_state_note": "CykTest.gd autoload emits [CYKTEST] telemetry; harness A6 asserts run gate + monotonic HUD timer + stick peak + player displacement + stick settle (negative control). verified: 2026-11-16 A54",
     "steps": [
       {"tap": [0.151, 0.388], "wait": 4.0},
       {"drag": [[0.141, 0.872], [0.24, 0.80]], "hold": 1.2, "wait": 0.6},
@@ -52,8 +60,10 @@
   },
   "006-tomb": {
     "launch_wait": 9,
+    "_note": "Second tap covers the legacy TAP TO START gate (removed in 006 c9a213d 'single gate', 2026-11-16 13:34; current HUD auto-starts 1.5s after scene load, HUD.gd:50). On current builds the tap is a harmless no-op in gameplay; on pre-c9a213d builds it presses START. Keep it so the recipe enters gameplay on either build. verified: 2026-11-16 code audit + A54",
     "steps": [
       {"tap": [0.2685, 0.4564], "wait": 4.5},
+      {"tap": [0.5, 0.544], "wait": 2.0},
       {"drag": [[0.135, 0.872], [0.24, 0.80]], "hold": 1.2, "wait": 0.6},
       {"shot": "gp1"},
       {"drag": [[0.135, 0.872], [0.135, 0.75]], "hold": 0.4, "wait": 1.5},

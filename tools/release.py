@@ -1,27 +1,46 @@
 #!/usr/bin/env python3
-"""cykgames release harness v2 -- one-shot, fail-fast release pipeline.
+"""cykgames release harness v3 -- one-shot release pipeline, per-game isolation.
 
 Pipeline per game:
-    bump (patch) -> export build from current HEAD -> install on device
-    -> smoke (5 hard asserts) -> tag + GitHub release -> catalog row update
+    headless test gate -> bump (patch) -> export build from current HEAD
+    -> install on device -> smoke -> tag + GitHub release -> catalog row update
 
-Hard asserts (any failure aborts the game AND the run):
-  A1 foreground: the resumed activity owns the game's package
+Hard asserts:
+  A1 foreground: the EXACT package parsed from the ResumedActivity line equals
+     the game's package (no substring match; topResumedActivity is not
+     confused with ResumedActivity)
   A2 orientation: project.godot -> APK manifest -> live screenshot all agree
-  A3 gameplay liveness: two screenshots inside gameplay differ (HUD timer /
-     score / world actually animating) AND the gameplay frame is not the menu
+  A3 gameplay reached + live: gameplay frame differs from the title frame and
+     the world/HUD animates. PIXEL EVIDENCE ONLY -- proves liveness, NEVER a
+     touch pass by itself.
   A4 crash-free: neither the crash buffer nor AndroidRuntime:E has a FATAL
   A5 publish integrity: GitHub release asset size == local APK size
+  A6 touch state (when the game emits [CYKTEST] telemetry): the parsed logcat
+     state series must satisfy the recipe's state_assert spec (run gate
+     passed, HUD timer monotonic increase, stick output peak, player
+     displacement, stick settles to zero after release). When [CYKTEST] is
+     present the state assertions are MANDATORY and pixel metrics demote to
+     warnings. Without the channel smoke records touch_pass=false plus a
+     warning -- pixel liveness alone is never touch verification.
+
+Version rule: version/code = major*10000 + minor*100 + patch (minor,patch<100).
+Failure isolation: any exception (not just ReleaseError) fails THAT game only;
+an uncommitted version bump is rolled back so the worktree stays clean for
+the next bot; the run continues and the catalog is gated on zero failures.
+--skip-build refuses to run unless the device's installed versionCode equals
+the preset code (stale-APK false passes are impossible).
 
 Usage:
   python tools/release.py 001-parkour 002-obby
-  python tools/release.py --all --publish
   python tools/release.py --all --publish --catalog
+  python tools/release.py 002-obby --skip-bump --skip-build   # verify installed
 Flags:
   --all            every game in the roster (default: the repo given on argv,
                    or none)
   --skip-bump      do not touch export_presets.cfg (verify an existing build)
-  --skip-build     reuse the APK that is already in build/ (never with publish)
+  --skip-build     reuse the APK in build/ AND require the device to already
+                   run exactly that versionCode (never with publish)
+  --skip-tests     skip the pre-build headless test gate (iteration only)
   --publish        git tag + push + GitHub release + asset verify
   --catalog        update profile/README.md rows, commit and push the org repo
   --report-dir     override the artifact root
@@ -159,6 +178,15 @@ def read_version(repo):
     return name, code
 
 
+def version_code(major, minor, patch):
+    """Collision-free Android versionCode: major*10000 + minor*100 + patch.
+    The old major*100+minor*10+patch collided (0.1.10 == 0.2.0 == 20)."""
+    if not (0 <= minor < 100 and 0 <= patch < 100):
+        raise ReleaseError(f"version {major}.{minor}.{patch} overflows the "
+                           "versionCode formula (minor and patch must be < 100)")
+    return major * 10000 + minor * 100 + patch
+
+
 def bump_patch(repo):
     cfg_path = PROJECTS / repo / "export_presets.cfg"
     cfg = cfg_path.read_text(encoding="utf-8", errors="replace")
@@ -166,7 +194,7 @@ def bump_patch(repo):
     major, minor, patch = (int(x) for x in name.split("."))
     patch += 1
     new_name = f"{major}.{minor}.{patch}"
-    new_code = major * 100 + minor * 10 + patch
+    new_code = version_code(major, minor, patch)
     cfg = re.sub(r'^version/name="[^"]+"', f'version/name="{new_name}"', cfg, count=1, flags=re.M)
     cfg = re.sub(r'^version/code=\d+', f"version/code={new_code}", cfg, count=1, flags=re.M)
     cfg_path.write_text(cfg, encoding="utf-8")
@@ -237,6 +265,16 @@ def install(dev, apk, pkg, expect_code):
     log(f"  install ok (versionCode={got})")
 
 
+def installed_version(dev, pkg):
+    """(versionCode, versionName) currently installed on the device; -1/None
+    when the package is absent."""
+    info = dev.adb("shell", "dumpsys", "package", pkg)
+    code = re.search(r"versionCode=(\d+)", info)
+    name = re.search(r"versionName=(\S+)", info)
+    return (int(code.group(1)) if code else -1,
+            name.group(1) if name else None)
+
+
 # --------------------------------------------------------------------------- #
 # smoke
 # --------------------------------------------------------------------------- #
@@ -252,11 +290,23 @@ def load_recipes():
 
 
 def resumed_activity(dev):
+    """The exact ResumedActivity line. Android 16 also prints
+    topResumedActivity=... FIRST -- a substring scan grabs the wrong line."""
     out = dev.adb("shell", "dumpsys", "activity", "activities")
-    for line in out.splitlines():
-        if "ResumedActivity" in line:
-            return line.strip()
+    lines = [l.strip() for l in out.splitlines()]
+    for l in lines:
+        if l.startswith("ResumedActivity:") or l.startswith("mResumedActivity"):
+            return l
+    for l in lines:                      # fallback for exotic dumpsys layouts
+        if l.startswith("topResumedActivity="):
+            return l
     return ""
+
+
+def activity_package(line):
+    """Exact package from an ActivityRecord line (u0 <pkg>/<activity>)."""
+    m = re.search(r"u\d+\s+([A-Za-z_][\w.]*)/", line)
+    return m.group(1) if m else None
 
 
 def crash_log(dev):
@@ -265,11 +315,12 @@ def crash_log(dev):
     return out
 
 
-def do_step(dev, step, w, h, shots, out_dir, label):
+def do_step(dev, step, w, h, shots, out_dir, label, timeline=None):
     if "tap" in step:
         fx, fy = step["tap"]
         dev.adb("shell", "input", "tap", str(int(fx * w)), str(int(fy * h)))
     elif "drag" in step:
+        t0 = time.time()
         (x0, y0), (x1, y1) = step["drag"]
         x0, y0, x1, y1 = int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h)
         steps = int(step.get("steps", 8))
@@ -280,6 +331,8 @@ def do_step(dev, step, w, h, shots, out_dir, label):
             time.sleep(0.05)
         time.sleep(float(step.get("hold", 1.0)))
         dev.adb("shell", "input", "motionevent", "UP", str(x1), str(y1))
+        if timeline is not None:
+            timeline.setdefault("drags", []).append([t0, time.time()])
     elif "shot" in step:
         name = step["shot"]
         shots[name] = dev.shot(out_dir / f"{label}_{name}.png")
@@ -287,8 +340,86 @@ def do_step(dev, step, w, h, shots, out_dir, label):
         time.sleep(float(step["wait"]))
 
 
+def collect_cyktest(dev):
+    """Parse [CYKTEST] {json} telemetry from logcat. Marker-based, tag-agnostic
+    (the Godot logcat tag is not stable across versions)."""
+    out = dev.adb("logcat", "-d", "-v", "epoch", timeout=120)
+    samples = []
+    for line in out.splitlines():
+        i = line.find("[CYKTEST]")
+        if i < 0:
+            continue
+        try:
+            d = json.loads(line[i + len("[CYKTEST]"):].strip())
+        except (ValueError, TypeError):
+            continue
+        if isinstance(d, dict):
+            samples.append(d)
+    return samples
+
+
+def _stick_mag(s):
+    st = s.get("stick") or [0.0, 0.0]
+    return (float(st[0]) ** 2 + float(st[1]) ** 2) ** 0.5
+
+
+def state_checks(samples, spec):
+    """A6 assertions over the parsed [CYKTEST] series. Returns a list of
+    {name, ok, detail}. The series covers the whole smoke window; the recipe
+    only injects stick drags, so stick activity is attributable to the
+    harness. stick_settles_after_release is the negative control (no input ->
+    zero output)."""
+    play = [s for s in samples if s.get("scene") == "play"]
+    checks = []
+
+    def add(name, ok, detail):
+        checks.append(dict(name=name, ok=bool(ok), detail=detail))
+
+    running = [s for s in play if s.get("running")]
+    if spec.get("require_running"):
+        add("run_gate", len(running) > 0,
+            f"{len(running)}/{len(play)} play samples running")
+    if "time_increase_min" in spec:
+        times = [float(s.get("time", 0.0)) for s in running]
+        if len(times) >= 2:
+            inc = times[-1] - times[0]
+            mono = all(b >= a - 0.05 for a, b in zip(times, times[1:]))
+            add("timer_monotonic_increase",
+                mono and inc >= float(spec["time_increase_min"]),
+                f"increase={inc:.2f}s monotonic={mono} samples={len(times)}")
+        else:
+            add("timer_monotonic_increase", False,
+                f"only {len(times)} running samples")
+    if "stick_peak_min" in spec:
+        mags = [_stick_mag(s) for s in play]
+        peak = max(mags) if mags else 0.0
+        active = sum(1 for m in mags if m >= float(spec["stick_peak_min"]))
+        add("stick_input_reached",
+            peak >= float(spec["stick_peak_min"]) and active >= 3,
+            f"peak={peak:.3f} samples_above_threshold={active}")
+    if "pos_delta_min" in spec:
+        poss = [s.get("pos") for s in play if s.get("pos")]
+        if len(poss) >= 2:
+            d = sum((float(x) - float(y)) ** 2
+                    for x, y in zip(poss[0], poss[-1])) ** 0.5
+            add("player_displacement", d >= float(spec["pos_delta_min"]),
+                f"first->last delta={d:.2f}")
+        else:
+            add("player_displacement", False, f"only {len(poss)} pos samples")
+    if "stick_settle_max" in spec:
+        if play:
+            m = _stick_mag(play[-1])
+            add("stick_settles_after_release",
+                m <= float(spec["stick_settle_max"]),
+                f"last sample |stick|={m:.3f}")
+        else:
+            add("stick_settles_after_release", False, "no play samples")
+    return checks
+
+
 def smoke(dev, repo, recipe, out_dir):
-    """Run the recipe and enforce A1..A4. Returns an evidence dict."""
+    """Run the recipe and enforce A1..A4 (+A6 when [CYKTEST] is present).
+    Returns an evidence dict; touch_pass is True ONLY with state assertions."""
     pkg = GAMES[repo]["pkg"]
     dev.adb("shell", "am", "force-stop", pkg)
     time.sleep(0.6)
@@ -297,11 +428,14 @@ def smoke(dev, repo, recipe, out_dir):
     time.sleep(float(recipe.get("launch_wait", 9)))
 
     evidence = {}
-    # A1 foreground
+    # A1 foreground (exact package equality, never substring)
     resumed = resumed_activity(dev)
     evidence["resumed_activity"] = resumed
-    if pkg not in resumed:
-        raise ReleaseError(f"A1 foreground: resumed='{resumed}' does not own {pkg}")
+    evidence["resumed_package"] = activity_package(resumed)
+    if evidence["resumed_package"] != pkg:
+        raise ReleaseError(f"A1 foreground: resumed package "
+                           f"'{evidence['resumed_package']}' != {pkg} "
+                           f"(line='{resumed}')")
 
     title = dev.shot(out_dir / f"{repo}_00_title.png")
     evidence["title_size"] = list(title.size)
@@ -315,8 +449,10 @@ def smoke(dev, repo, recipe, out_dir):
         raise ReleaseError(f"A2 orientation: preset wants {want}, live screen is {live}")
 
     shots = {}
+    timeline = {}
     for i, step in enumerate(recipe["steps"]):
-        do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}")
+        do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}", timeline)
+    evidence["input_timeline"] = timeline
     for key in ("gp1", "gp2"):
         if key not in shots:
             raise ReleaseError(f"recipe for {repo} never captured {key}")
@@ -324,10 +460,39 @@ def smoke(dev, repo, recipe, out_dir):
     # A1 again -- the game must still be the foreground app after input
     resumed2 = resumed_activity(dev)
     evidence["resumed_activity_after"] = resumed2
-    if pkg not in resumed2:
-        raise ReleaseError(f"A1 foreground after input: '{resumed2}'")
+    evidence["resumed_package_after"] = activity_package(resumed2)
+    if evidence["resumed_package_after"] != pkg:
+        raise ReleaseError(f"A1 foreground after input: package "
+                           f"'{evidence['resumed_package_after']}' != {pkg} "
+                           f"(line='{resumed2}')")
 
-    # A3 gameplay liveness
+    # A6 touch state FIRST: [CYKTEST] telemetry is authoritative when present.
+    samples = collect_cyktest(dev)
+    spec = recipe.get("state_assert")
+    evidence["cyktest_samples"] = len(samples)
+    if samples:
+        if not spec:
+            raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
+                               "has no state_assert spec")
+        checks = state_checks(samples, spec)
+        evidence["state_checks"] = checks
+        bad = [c for c in checks if not c["ok"]]
+        if bad:
+            raise ReleaseError("A6 touch state failed: " + "; ".join(
+                f"{c['name']} ({c['detail']})" for c in bad))
+        evidence["touch_pass"] = True
+        log(f"  A6 touch state PASS ({len(samples)} samples, "
+            f"{len(checks)} checks)")
+    else:
+        evidence["touch_pass"] = False
+        evidence["touch_warning"] = ("no [CYKTEST] telemetry: pixel liveness "
+                                     "only, NOT a touch proof")
+        log("  WARNING: no [CYKTEST] channel -- touch_pass=false "
+            "(pixel liveness only)")
+
+    # A3 gameplay reached + live. Pixel evidence is a LIVENESS gate, never a
+    # touch pass. With a passing A6 state series, pixel problems demote to
+    # warnings (state is authoritative); without the channel they stay hard.
     mean_gg, frac_gg = diff_frac(shots["gp1"], shots["gp2"])
     mean_gt, frac_gt = diff_frac(title, shots["gp2"])
     # HUD strip measured at FULL resolution: a single timer digit flip is only
@@ -342,14 +507,23 @@ def smoke(dev, repo, recipe, out_dir):
     evidence.update(gp_diff_mean=mean_gg, gp_diff_frac=frac_gg,
                     menu_to_game_frac=frac_gt, hud_diff_frac=hud_frac,
                     gp_threshold=GAMEPLAY_DIFF_MIN, hud_threshold=HUD_DIFF_MIN,
-                    menu_threshold=menu_min)
+                    menu_threshold=menu_min,
+                    pixel_role="liveness-only (never a touch pass)")
+    pixel_problems = []
     if frac_gt < menu_min:
-        raise ReleaseError(f"A3 gameplay: frame barely differs from the title "
-                           f"({frac_gt} < {menu_min}) -- never reached gameplay")
+        pixel_problems.append(f"frame barely differs from the title "
+                              f"({frac_gt} < {menu_min})")
     if hud_frac < HUD_DIFF_MIN and frac_gg < GAMEPLAY_DIFF_MIN:
-        raise ReleaseError("A3 gameplay: HUD strip frozen and the world static "
-                           f"(hud={hud_frac} < {HUD_DIFF_MIN}, world={frac_gg} < "
-                           f"{GAMEPLAY_DIFF_MIN}) -- the run is not live")
+        pixel_problems.append(f"HUD strip frozen and world static "
+                              f"(hud={hud_frac}, world={frac_gg})")
+    if pixel_problems:
+        if evidence["touch_pass"]:
+            evidence["pixel_warnings"] = pixel_problems
+            log("  WARNING: pixel liveness: " + "; ".join(pixel_problems)
+                + " (A6 state passed, demoted to warning)")
+        else:
+            raise ReleaseError("A3 gameplay: " + "; ".join(pixel_problems)
+                               + " -- never reached a live gameplay frame")
 
     # A4 crash free
     crashes = crash_log(dev)
@@ -360,6 +534,52 @@ def smoke(dev, repo, recipe, out_dir):
     dev.adb("shell", "am", "force-stop", pkg)
     evidence["ok"] = True
     return evidence
+
+
+# --------------------------------------------------------------------------- #
+# headless test gate (pre-build)
+# --------------------------------------------------------------------------- #
+# Scan rule: tools/test_*.tscn + tools/headless_test.tscn + tools/regression.tscn
+# (005/008 name their harness headless_test, 003 names it regression -- the
+# old "every repo has tools/test_*.gd" claim was false). Probes / shot tools /
+# autoplay drivers are NOT tests and are excluded. All test scenes exit 0/1.
+TEST_FLAGS = {
+    ("008-shmup", "headless_test.tscn"): ["--fixed-fps", "60"],
+    ("009-shooter", "test_touch_events.tscn"): ["--fixed-fps", "60"],
+}
+
+
+def headless_test_scenes(repo):
+    tools = PROJECTS / repo / "tools"
+    scenes = sorted(tools.glob("test_*.tscn"))
+    for extra in ("headless_test.tscn", "regression.tscn"):
+        p = tools / extra
+        if p.exists() and p not in scenes:
+            scenes.append(p)
+    return scenes
+
+
+def run_headless_tests(repo, out_dir):
+    scenes = headless_test_scenes(repo)
+    if not scenes:
+        log(f"  WARNING: {repo} has no headless test scenes under tools/")
+        return []
+    run([GODOT, "--headless", "--path", PROJECTS / repo, "--import"], timeout=600)
+    results = []
+    for sc in scenes:
+        flags = TEST_FLAGS.get((repo, sc.name), [])
+        t0 = time.time()
+        rc, out = run([GODOT, "--headless", *flags, "--path", PROJECTS / repo,
+                       f"res://tools/{sc.name}"], timeout=420)
+        (out_dir / f"headless_{sc.stem}.log").write_text(out, encoding="utf-8")
+        dt = time.time() - t0
+        results.append(dict(scene=sc.name, rc=rc, ok=(rc == 0),
+                            seconds=round(dt, 1)))
+        if rc != 0:
+            raise ReleaseError(f"headless test {sc.name} failed (rc={rc}), "
+                               f"refusing to build\n{out[-1200:]}")
+        log(f"  headless {sc.name} PASS ({dt:.0f}s)")
+    return results
 
 
 # --------------------------------------------------------------------------- #
@@ -403,13 +623,23 @@ def release_notes(repo, tag, prev_tag, head=None):
     return "\n".join(body)
 
 
-def publish(dev, repo, tag, apk, size, out_dir, notes=None):
+def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
+            head_built=None):
     d = PROJECTS / repo
     # commit the version bump so the tagged tree matches the built APK
     run(["git", "add", "export_presets.cfg"], cwd=d, check=True)
     rc, out = run(["git", "commit", "-m", f"chore(release): {tag}"], cwd=d)
     if rc != 0 and "nothing to commit" not in out:
         raise ReleaseError(f"version commit failed: {out[-400:]}")
+    if rec is not None:
+        rec["version_committed"] = True   # past this point rollback must not
+                                          # rewrite a committed file
+    if head_built:
+        _, out = run(["git", "diff", "--name-only", head_built, "HEAD"], cwd=d)
+        changed = [l.strip() for l in out.splitlines() if l.strip()]
+        if changed and changed != ["export_presets.cfg"]:
+            raise ReleaseError("tagged tree differs from the built tree "
+                               f"beyond the version bump: {changed}")
     # notes are written from the committed build state, not the parent
     run(["git", "fetch", "--tags", "--quiet"], cwd=d, timeout=300)
     if notes is None:
@@ -539,6 +769,8 @@ def main():
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--skip-bump", action="store_true")
     ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--skip-tests", action="store_true",
+                    help="skip the pre-build headless gate (iteration only)")
     ap.add_argument("--publish", action="store_true")
     ap.add_argument("--catalog", action="store_true")
     ap.add_argument("--allow-dirty", action="store_true",
@@ -561,7 +793,7 @@ def main():
                             HOME / "cykagent9" / "workspace" / "artifacts")))
     out_root = root / f"release_verify_{stamp}"
     out_root.mkdir(parents=True, exist_ok=True)
-    log(f"== release harness v2  device/reports -> {out_root}")
+    log(f"== release harness v3  device/reports -> {out_root}")
 
     dev = Device()
     log(f"== device {dev.serial}")
@@ -573,6 +805,8 @@ def main():
         rec = dict(repo=repo, pkg=GAMES[repo]["pkg"], started=datetime.now().isoformat(timespec="seconds"))
         out_dir = out_root / repo
         out_dir.mkdir(exist_ok=True)
+        cfg_path = PROJECTS / repo / "export_presets.cfg"
+        cfg_backup = None
         try:
             if not (PROJECTS / repo).exists():
                 raise ReleaseError("repo missing on disk")
@@ -586,20 +820,34 @@ def main():
             if args.skip_bump:
                 ver, code = read_version(repo)
             else:
+                cfg_backup = cfg_path.read_text(encoding="utf-8", errors="replace")
                 ver, code = bump_patch(repo)
             rec.update(version=ver, version_code=code)
             tag = f"v{ver}"
 
-            # preset code formula
+            # preset code formula (collision-free since the v3 migration)
             major, minor, patch = (int(x) for x in ver.split("."))
-            want_code = major * 100 + minor * 10 + patch
+            want_code = version_code(major, minor, patch)
             if code != want_code:
-                raise ReleaseError(f"versionCode {code} != major*100+minor*10+patch ({want_code})")
+                raise ReleaseError(f"versionCode {code} != "
+                                   f"major*10000+minor*100+patch ({want_code})")
 
             if args.skip_build:
                 apk = PROJECTS / repo / GAMES[repo]["apk"]
+                if not apk.exists():
+                    raise ReleaseError(f"skip-build: {apk} missing")
                 size = apk.stat().st_size
+                got_code, got_name = installed_version(dev, GAMES[repo]["pkg"])
+                rec["installed_version"] = dict(code=got_code, name=got_name)
+                if got_code != code:
+                    raise ReleaseError(f"skip-build: device versionCode "
+                                       f"{got_code} != preset {code} -- stale "
+                                       "APK on device; install the matching "
+                                       "build first (no touch pass on a "
+                                       "version mismatch)")
             else:
+                if not args.skip_tests:
+                    rec["headless"] = run_headless_tests(repo, out_dir)
                 apk, size = build_apk(repo)
             rec.update(apk=str(apk), apk_size=size, head_built=git_head(repo))
 
@@ -620,14 +868,27 @@ def main():
             rec["smoke"] = smoke(dev, repo, recipes[repo], out_dir)
 
             if args.publish:
-                rec["publish"] = publish(dev, repo, tag, apk, size, out_dir)
+                if git_head(repo) != rec["head_built"]:
+                    raise ReleaseError("HEAD moved since the build -- refusing "
+                                       "to publish an APK that does not match "
+                                       "the tagged tree")
+                rec["publish"] = publish(dev, repo, tag, apk, size, out_dir,
+                                         rec=rec, head_built=rec["head_built"])
             rec["ok"] = True
             log(f"  PASS {repo} v{ver}")
-        except ReleaseError as e:
+        except Exception as e:
+            # Any exception fails THIS game only. Roll back an uncommitted
+            # bump so the worktree stays clean for the next bot/run.
+            if cfg_backup is not None and not rec.get("version_committed"):
+                try:
+                    cfg_path.write_text(cfg_backup, encoding="utf-8")
+                    log("  rollback: export_presets.cfg restored to pre-bump")
+                except OSError as re:
+                    log(f"  rollback FAILED: {re}")
             rec["ok"] = False
-            rec["error"] = str(e)
-            failures.append((repo, str(e)))
-            log(f"  FAIL {repo}: {e}")
+            rec["error"] = f"{type(e).__name__}: {e}"
+            failures.append((repo, rec["error"]))
+            log(f"  FAIL {repo}: {rec['error']}")
         results[repo] = rec
         (out_root / f"{repo}.json").write_text(json.dumps(rec, indent=2), encoding="utf-8")
 
