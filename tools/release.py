@@ -400,10 +400,12 @@ def state_checks(samples, spec):
     if "pos_delta_min" in spec:
         poss = [s.get("pos") for s in play if s.get("pos")]
         if len(poss) >= 2:
-            d = sum((float(x) - float(y)) ** 2
-                    for x, y in zip(poss[0], poss[-1])) ** 0.5
+            # Max excursion from the first sample: a fall+respawn must not
+            # erase the evidence that input moved the player.
+            d = max(sum((float(x) - float(y)) ** 2
+                        for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
             add("player_displacement", d >= float(spec["pos_delta_min"]),
-                f"first->last delta={d:.2f}")
+                f"max excursion from first sample={d:.2f}")
         else:
             add("player_displacement", False, f"only {len(poss)} pos samples")
     if "stick_settle_max" in spec:
