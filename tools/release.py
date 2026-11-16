@@ -942,6 +942,26 @@ def release_notes(repo, tag, prev_tag, head=None):
 def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
             head_built=None):
     d = PROJECTS / repo
+    # NEVER silently replace an existing public release: the tag and the
+    # release must both be new. Replacing an existing release requires an
+    # explicit manual workflow (remove it first), not a harness side effect.
+    _, out = run(["git", "tag", "-l", tag], cwd=d)
+    if out.strip():
+        raise ReleaseError(f"tag {tag} already exists locally -- refusing to "
+                           "replace an existing release (explicit force "
+                           "workflow required)")
+    _, out = run(["git", "ls-remote", "--tags", "origin", f"refs/tags/{tag}"],
+                 cwd=d, timeout=120)
+    if out.strip():
+        raise ReleaseError(f"tag {tag} already exists on origin -- refusing to "
+                           "replace an existing release (explicit force "
+                           "workflow required)")
+    status, rel = gh_api(f"/repos/{GH_ORG}/{repo}/releases/tags/{tag}")
+    if status == 200:
+        raise ReleaseError(f"release {tag} already exists -- refusing to "
+                           "replace its assets (explicit force workflow required)")
+    if status != 404:
+        raise ReleaseError(f"release pre-check failed {status}: {rel}")
     # commit the version bump so the tagged tree matches the built APK
     run(["git", "add", "export_presets.cfg"], cwd=d, check=True)
     rc, out = run(["git", "commit", "-m", f"chore(release): {tag}"], cwd=d)
@@ -962,9 +982,10 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
         _, tags = run(["git", "tag", "--sort=-creatordate"], cwd=d)
         prev = [t for t in tags.split() if t and t != tag][:1]
         notes = release_notes(repo, tag, prev[0] if prev else None, head=git_head(repo))
-    # tag + push
+    # tag + push (tag must be new -- pre-checked above; no tolerance for
+    # "already exists" here)
     rc, out = run(["git", "tag", "-a", tag, "-m", f"{GAMES[repo]['title']} {tag}"], cwd=d)
-    if rc != 0 and "already exists" not in out:
+    if rc != 0:
         raise ReleaseError(f"git tag failed: {out[-400:]}")
     for ref in ("HEAD:main", tag):
         rc, out = run(["git", "push", "origin", ref], cwd=d, timeout=300)
@@ -982,13 +1003,17 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
         if status not in (200, 201):
             raise ReleaseError(f"release create failed {status}: {rel}")
         rel = json.loads(rel) if isinstance(rel, (bytes, str)) else rel
-    elif status != 200:
-        raise ReleaseError(f"release lookup failed {status}: {rel}")
+    else:
+        # 200 here means a release appeared after the pre-check (race):
+        # refuse rather than touch its assets.
+        raise ReleaseError(f"release {tag} appeared during publish (status "
+                           f"{status}) -- refusing to replace assets")
 
     asset_name = f"{repo}-{tag}.apk"
     existing = [a for a in rel.get("assets", []) if a.get("name") == asset_name]
-    for a in existing:
-        gh_api(f"/repos/{GH_ORG}/{repo}/releases/assets/{a['id']}", method="DELETE")
+    if existing:
+        raise ReleaseError(f"asset {asset_name} already exists on the new "
+                           "release -- refusing to delete/replace it")
     payload = apk.read_bytes()
     up = (f"https://uploads.github.com/repos/{GH_ORG}/{repo}/releases/"
           f"{rel['id']}/assets?name={urllib.parse.quote(asset_name)}")
