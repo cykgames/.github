@@ -49,6 +49,7 @@ Author: cykbot9 (AI agent). Lives in cykgames/.github/tools/.
 import argparse
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -340,11 +341,46 @@ def do_step(dev, step, w, h, shots, out_dir, label, timeline=None):
         time.sleep(float(step["wait"]))
 
 
+def _reject_constant(x):
+    raise ValueError(f"non-finite JSON constant: {x}")
+
+
+def _finite_num(x):
+    return (isinstance(x, (int, float)) and not isinstance(x, bool)
+            and math.isfinite(x))
+
+
+def _valid_sample(d):
+    """Schema gate for [CYKTEST] payloads. Missing/wrong-typed fields are
+    malformed, NEVER silently coerced to success values (an unobserved stick
+    is not an observed zero; running must be a real boolean; vectors must be
+    fixed-dimension finite numbers)."""
+    scene = d.get("scene")
+    if scene not in ("play", "select"):
+        return False
+    if scene == "select":
+        return True
+    if not isinstance(d.get("running"), bool):
+        return False
+    if not _finite_num(d.get("time")):
+        return False
+    st = d.get("stick")
+    if not (isinstance(st, list) and len(st) == 2
+            and all(_finite_num(v) for v in st)):
+        return False
+    pos = d.get("pos")
+    if not (isinstance(pos, list) and len(pos) == 3
+            and all(_finite_num(v) for v in pos)):
+        return False
+    return True
+
+
 def collect_cyktest(dev):
     """Parse [CYKTEST] {json} telemetry from logcat. Marker-based, tag-agnostic
     (the Godot logcat tag is not stable across versions). Returns
     (samples, stats): stats counts marker lines and malformed payloads so a
-    corrupt channel can never silently fall back to pixel-only."""
+    corrupt channel can never silently fall back to pixel-only. Payloads must
+    pass _valid_sample; NaN/Infinity literals are rejected at parse time."""
     out = dev.adb("logcat", "-d", "-v", "epoch", timeout=120)
     samples = []
     marker_lines = 0
@@ -355,11 +391,12 @@ def collect_cyktest(dev):
             continue
         marker_lines += 1
         try:
-            d = json.loads(line[i + len("[CYKTEST]"):].strip())
+            d = json.loads(line[i + len("[CYKTEST]"):].strip(),
+                           parse_constant=_reject_constant)
         except (ValueError, TypeError):
             malformed += 1
             continue
-        if isinstance(d, dict):
+        if isinstance(d, dict) and _valid_sample(d):
             samples.append(d)
         else:
             malformed += 1
@@ -367,12 +404,20 @@ def collect_cyktest(dev):
 
 
 def _stick_mag(s):
-    st = s.get("stick") or [0.0, 0.0]
+    st = s.get("stick")
+    if not (isinstance(st, list) and len(st) == 2
+            and all(_finite_num(v) for v in st)):
+        raise ReleaseError(f"A6: sample lacks a valid stick vector: {s}")
     return (float(st[0]) ** 2 + float(st[1]) ** 2) ** 0.5
 
 
 ALLOWED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
                      "pos_delta_min", "stick_settle_max"}
+# Minimum strength for a declared spec: run gate + monotonic timer + input
+# reaching the control + the release negative control. A weak spec (e.g. only
+# require_running) must not earn touch_pass. pos_delta_min is recommended.
+REQUIRED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
+                      "stick_settle_max"}
 
 
 def state_checks(samples, spec):
@@ -481,24 +526,32 @@ def smoke(dev, repo, recipe, out_dir):
                            f"(line='{resumed2}')")
 
     # A6 touch state FIRST: [CYKTEST] telemetry is authoritative when present.
-    # Fail-CLOSED: corrupt telemetry, a vacuous spec, or a declared-but-missing
-    # channel all raise -- none of them may silently fall back to pixel-only.
+    # Fail-CLOSED: corrupt telemetry, an empty/weak/unknown-key spec, or a
+    # declared-but-missing channel all raise -- none of them may silently fall
+    # back to pixel-only. Declaration is keyed on PRESENCE, not truthiness
+    # ({} and null are declarations and must be rejected).
     samples, tstats = collect_cyktest(dev)
+    declared = "state_assert" in recipe
     spec = recipe.get("state_assert")
     evidence["cyktest_samples"] = len(samples)
     evidence["cyktest_stats"] = tstats
     if tstats["malformed"]:
         raise ReleaseError(f"A6: {tstats['malformed']} malformed [CYKTEST] "
                            "line(s) -- corrupt telemetry, refusing pixel fallback")
-    if spec is not None and not isinstance(spec, dict):
-        raise ReleaseError("A6: state_assert must be a JSON object")
-    if samples:
-        if spec is None:
-            raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
-                               "has no state_assert spec")
+    if declared:
+        if not isinstance(spec, dict):
+            raise ReleaseError("A6: state_assert must be a JSON object")
         unknown = set(spec) - ALLOWED_SPEC_KEYS
         if unknown:
             raise ReleaseError(f"A6: unknown state_assert keys {sorted(unknown)}")
+        missing = REQUIRED_SPEC_KEYS - set(spec)
+        if missing:
+            raise ReleaseError(f"A6: state_assert below minimum strength, "
+                               f"missing keys {sorted(missing)}")
+    if samples:
+        if not declared:
+            raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
+                               "has no state_assert spec")
         checks = state_checks(samples, spec)
         if not checks:
             raise ReleaseError("A6: state_assert produced zero checks -- "
@@ -512,7 +565,7 @@ def smoke(dev, repo, recipe, out_dir):
         log(f"  A6 touch state PASS ({len(samples)} samples, "
             f"{len(checks)} checks)")
     else:
-        if spec:
+        if declared:
             raise ReleaseError(f"A6: {repo} recipe declares state_assert but "
                                "no [CYKTEST] telemetry found -- channel broken")
         evidence["touch_pass"] = False
