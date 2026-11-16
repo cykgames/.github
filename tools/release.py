@@ -468,13 +468,17 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
     play = [s for s in samples if s.get("scene") == "play"]
     running = [s for s in play if s.get("running")]
     ts_all = [float(s["ts"]) for s in samples]
-    if any(b < a - 0.001 for a, b in zip(ts_all, ts_all[1:])):
+    if any(b < a - 1e-9 for a, b in zip(ts_all, ts_all[1:])):
         raise ReleaseError("A6: telemetry timestamps out of order -- "
                            "corrupt series, refusing to assert")
-    if ts_max is not None and any(t > ts_max for t in ts_all):
-        raise ReleaseError(f"A6: telemetry timestamp in the future "
-                           f"(max={max(ts_all):.2f} > collection ceiling "
-                           f"{ts_max:.2f}) -- forged/corrupt clock")
+    if ts_max is not None:
+        if not math.isfinite(ts_max):
+            raise ReleaseError("A6: non-finite collection ceiling -- "
+                               "corrupt clock, refusing to assert")
+        if any(t > ts_max for t in ts_all):
+            raise ReleaseError(f"A6: telemetry timestamp in the future "
+                               f"(max={max(ts_all):.2f} > collection ceiling "
+                               f"{ts_max:.2f}) -- forged/corrupt clock")
     checks = []
 
     def add(name, ok, detail):
@@ -503,19 +507,45 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
         peak >= float(spec["stick_peak_min"]) and active >= 3,
         f"peak={peak:.3f} running_samples_above_threshold={active}")
 
-    # displacement must happen WHILE INPUT IS ACTIVE (causal, not just
-    # "somewhere during the run"): excursion across active-stick samples.
-    act = [s for s in running
-           if _stick_mag(s) >= float(spec["stick_peak_min"])]
-    if len(act) >= 2:
-        poss = [s["pos"] for s in act]
-        d = max(sum((float(x) - float(y)) ** 2
-                    for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
-        add("player_displacement", d >= float(spec["pos_delta_min"]),
-            f"excursion during active input={d:.2f} ({len(act)} samples)")
+    # displacement must happen INSIDE a continuous active-input segment,
+    # and (when drags are known) inside an injection window. Motion during
+    # a neutral gap between two active segments is NOT input evidence
+    # (no cross-segment stitching).
+    peak_min = float(spec["stick_peak_min"])
+    segs, cur = [], []
+    for s in running:
+        if _stick_mag(s) >= peak_min:
+            if cur and float(s["ts"]) - float(cur[-1]["ts"]) > 0.6:
+                segs.append(cur)
+                cur = []
+            cur.append(s)
+        elif cur:
+            segs.append(cur)
+            cur = []
+    if cur:
+        segs.append(cur)
+
+    def seg_excursion(seg):
+        poss = [s["pos"] for s in seg]
+        return max(sum((float(x) - float(y)) ** 2
+                       for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
+
+    if drags:
+        best = 0.0
+        for (t0, t1) in drags:
+            for seg in segs:
+                inside = [s for s in seg if t0 <= float(s["ts"]) <= t1]
+                if len(inside) >= 2:
+                    best = max(best, seg_excursion(inside))
+        add("player_displacement", best >= float(spec["pos_delta_min"]),
+            f"max within-drag active-segment excursion={best:.2f}")
+    elif segs:
+        qualifying = [seg for seg in segs if len(seg) >= 2]
+        best = max((seg_excursion(seg) for seg in qualifying), default=0.0)
+        add("player_displacement", best >= float(spec["pos_delta_min"]),
+            f"max active-segment excursion={best:.2f}")
     else:
-        add("player_displacement", False,
-            f"only {len(act)} active-input running samples")
+        add("player_displacement", False, "no active-input running segments")
 
     # per-drag coverage: active samples strictly INSIDE the window interior.
     # The uncertainty margin shrinks the window; samples in the tolerance
@@ -535,7 +565,8 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
             f"{covered}/{len(drags)} windows with >=2 active samples inside "
             f"the interior (unc={unc:.2f}s)")
 
-    # settle: fresh sample after the last release + channel alive at the end
+    # settle: fresh sample after the last release (conservative: the true UP
+    # may be as late as last_up + unc) + channel alive at the bounded end.
     if play:
         last = play[-1]
         m = _stick_mag(last)
@@ -543,10 +574,11 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
         fdetail = ""
         if drags:
             last_up = max(t1 for _, t1 in drags)
-            fresh = float(last["ts"]) >= last_up + 0.2
-            fdetail = f"last_ts={float(last['ts']):.2f} last_up={last_up:.2f}"
+            fresh = float(last["ts"]) >= last_up + unc + 0.2
+            fdetail = (f"last_ts={float(last['ts']):.2f} "
+                       f"last_up={last_up:.2f} unc={unc:.2f}")
         if end_dev is not None:
-            alive = float(last["ts"]) >= end_dev - 1.0
+            alive = float(last["ts"]) >= end_dev + unc - 1.0
             fresh = fresh and alive
             fdetail += f" recipe_end={end_dev:.2f}"
         add("stick_settles_after_release",
@@ -560,13 +592,16 @@ def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
 def device_clock_sample(dev):
     """Bracketed device-clock read: host midpoint cancels symmetric ADB
     one-way latency; rtt bounds the alignment uncertainty. None when the
-    clock is unreadable -- callers decide fail-closed."""
+    clock is unreadable OR non-finite (a NaN clock would poison the ts
+    ceiling) -- callers decide fail-closed."""
     h0 = time.time()
     out = dev.adb("shell", "date", "+%s.%N")
     h1 = time.time()
     try:
         d = float(out.strip())
     except (ValueError, TypeError):
+        return None
+    if not math.isfinite(d) or not math.isfinite(h1 - h0):
         return None
     return dict(dev=d, host=(h0 + h1) / 2.0, rtt=h1 - h0)
 
@@ -1083,10 +1118,16 @@ def main():
             # bump so the worktree stays clean for the next bot/run.
             if cfg_backup is not None and not rec.get("version_committed"):
                 try:
-                    run(["git", "reset", "-q", "--", "export_presets.cfg"],
-                        cwd=PROJECTS / repo)
+                    rc_r, out_r = run(["git", "reset", "-q", "--",
+                                       "export_presets.cfg"], cwd=PROJECTS / repo)
+                    if rc_r != 0:
+                        log(f"  rollback: git reset failed rc={rc_r}: "
+                            f"{out_r.strip()[-200:]}")
                     cfg_path.write_text(cfg_backup, encoding="utf-8")
-                    log("  rollback: export_presets.cfg restored to pre-bump")
+                    if cfg_path.read_bytes() != cfg_backup.encode("utf-8"):
+                        log("  rollback FAILED: read-back mismatch")
+                    else:
+                        log("  rollback: export_presets.cfg restored to pre-bump")
                 except OSError as re:
                     log(f"  rollback FAILED: {re}")
             rec["ok"] = False
