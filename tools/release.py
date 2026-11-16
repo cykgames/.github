@@ -266,6 +266,33 @@ def install(dev, apk, pkg, expect_code):
     log(f"  install ok (versionCode={got})")
 
 
+def index_blob_bytes(repo):
+    """Raw bytes of export_presets.cfg as currently STAGED in the index,
+    or None when the file is not staged. Snapshot before bump so rollback
+    can restore the exact original index state (not just the worktree)."""
+    p = subprocess.run(["git", "show", ":export_presets.cfg"],
+                       cwd=str(PROJECTS / repo), capture_output=True)
+    return p.stdout if p.returncode == 0 else None
+
+
+def restore_index(repo, blob):
+    """Restore the pre-bump index state for export_presets.cfg.
+    blob None -> unstage; blob bytes -> put the exact original staged
+    content back via hash-object + update-index. Returns True on success."""
+    if blob is None:
+        rc, _ = run(["git", "reset", "-q", "--", "export_presets.cfg"],
+                    cwd=PROJECTS / repo)
+        return rc == 0
+    p = subprocess.run(["git", "hash-object", "-w", "--stdin"],
+                       cwd=str(PROJECTS / repo), input=blob, capture_output=True)
+    if p.returncode != 0:
+        return False
+    sha = p.stdout.decode("utf-8", "replace").strip()
+    rc, _ = run(["git", "update-index", "--cacheinfo",
+                 f"100644,{sha},export_presets.cfg"], cwd=PROJECTS / repo)
+    return rc == 0
+
+
 def installed_version(dev, pkg):
     """(versionCode, versionName) currently installed on the device; -1/None
     when the package is absent."""
@@ -1065,6 +1092,7 @@ def main():
         out_dir.mkdir(exist_ok=True)
         cfg_path = PROJECTS / repo / "export_presets.cfg"
         cfg_backup = None
+        idx_backup = None
         try:
             if not (PROJECTS / repo).exists():
                 raise ReleaseError("repo missing on disk")
@@ -1079,6 +1107,7 @@ def main():
                 ver, code = read_version(repo)
             else:
                 cfg_backup = cfg_path.read_bytes()
+                idx_backup = index_blob_bytes(repo)
                 ver, code = bump_patch(repo)
             rec.update(version=ver, version_code=code)
             tag = f"v{ver}"
@@ -1139,16 +1168,16 @@ def main():
             # bump so the worktree stays clean for the next bot/run.
             if cfg_backup is not None and not rec.get("version_committed"):
                 # Cleanup must never raise out of the per-game handler:
-                # isolate the reset (its subprocess timeout is not OSError)
-                # and the file restore independently.
+                # isolate the index restore (its subprocess timeout is not
+                # OSError) and the file restore independently.
                 try:
-                    rc_r, out_r = run(["git", "reset", "-q", "--",
-                                       "export_presets.cfg"], cwd=PROJECTS / repo)
-                    if rc_r != 0:
-                        log(f"  rollback: git reset failed rc={rc_r}: "
-                            f"{out_r.strip()[-200:]}")
+                    if restore_index(repo, idx_backup):
+                        log("  rollback: index state restored")
+                    else:
+                        log("  rollback: index restore FAILED "
+                            "(worktree restore still attempted)")
                 except Exception as re:
-                    log(f"  rollback: git reset raised "
+                    log(f"  rollback: index restore raised "
                         f"{type(re).__name__}: {re}")
                 try:
                     # raw bytes restore: read_text/write_text would normalize
