@@ -266,31 +266,56 @@ def install(dev, apk, pkg, expect_code):
     log(f"  install ok (versionCode={got})")
 
 
-def index_blob_bytes(repo):
-    """Raw bytes of export_presets.cfg as currently STAGED in the index,
-    or None when the file is not staged. Snapshot before bump so rollback
-    can restore the exact original index state (not just the worktree)."""
-    p = subprocess.run(["git", "show", ":export_presets.cfg"],
-                       cwd=str(PROJECTS / repo), capture_output=True)
-    return p.stdout if p.returncode == 0 else None
+def index_entry(repo):
+    """Snapshot the FULL stage-0 index entry for export_presets.cfg:
+    returns dict(mode, oid), or None when the file has no index entry
+    (untracked, or staged deletion). Fail-CLOSED before any modification:
+    a git read failure or an unmerged/multi-stage index raises, so rollback
+    never has to guess the original state."""
+    rc, out = run(["git", "ls-files", "-s", "export_presets.cfg"],
+                  cwd=PROJECTS / repo)
+    if rc != 0:
+        raise ReleaseError(f"index snapshot failed (rc={rc}): {out.strip()[-200:]}")
+    lines = [l for l in out.splitlines() if l.strip()]
+    if not lines:
+        return None
+    if len(lines) != 1:
+        raise ReleaseError("index has unmerged/multiple entries for "
+                           "export_presets.cfg; resolve before release")
+    parts = lines[0].split()
+    mode, oid, stage = parts[0], parts[1], parts[2]
+    if stage != "0":
+        raise ReleaseError("index entry for export_presets.cfg is unmerged; "
+                           "resolve before release")
+    return dict(mode=mode, oid=oid)
 
 
-def restore_index(repo, blob):
-    """Restore the pre-bump index state for export_presets.cfg.
-    blob None -> unstage; blob bytes -> put the exact original staged
-    content back via hash-object + update-index. Returns True on success."""
-    if blob is None:
-        rc, _ = run(["git", "reset", "-q", "--", "export_presets.cfg"],
-                    cwd=PROJECTS / repo)
-        return rc == 0
-    p = subprocess.run(["git", "hash-object", "-w", "--stdin"],
-                       cwd=str(PROJECTS / repo), input=blob, capture_output=True)
-    if p.returncode != 0:
-        return False
-    sha = p.stdout.decode("utf-8", "replace").strip()
-    rc, _ = run(["git", "update-index", "--cacheinfo",
-                 f"100644,{sha},export_presets.cfg"], cwd=PROJECTS / repo)
-    return rc == 0
+def restore_index(repo, entry):
+    """Restore the EXACT pre-bump index entry (existence + mode + oid).
+    Returns (ok, detail). entry None means 'no entry originally': keep it
+    absent (re-stage the deletion when the file is tracked in HEAD; do
+    nothing when untracked). Never substitute a reset-to-HEAD."""
+    d = PROJECTS / repo
+    if entry is None:
+        rcC, outC = run(["git", "ls-files", "-s", "export_presets.cfg"], cwd=d)
+        if rcC == 0 and not outC.strip():
+            return True, "absent-entry preserved"
+        rcH, _ = run(["git", "cat-file", "-e", "HEAD:export_presets.cfg"], cwd=d)
+        if rcH == 0:
+            rc, out = run(["git", "rm", "--cached", "-q", "--",
+                           "export_presets.cfg"], cwd=d)
+            if rc != 0:
+                return False, f"rm --cached rc={rc}: {out.strip()[-150:]}"
+        return True, "absent-entry preserved"
+    rc, out = run(["git", "update-index", "--cacheinfo",
+                   f"{entry['mode']},{entry['oid']},export_presets.cfg"], cwd=d)
+    if rc != 0:
+        return False, f"update-index rc={rc}: {out.strip()[-150:]}"
+    rc2, out2 = run(["git", "ls-files", "-s", "export_presets.cfg"], cwd=d)
+    want = f"{entry['mode']} {entry['oid']} 0\texport_presets.cfg"
+    if rc2 != 0 or out2.strip() != want:
+        return False, f"read-back {out2.strip()!r} != {want!r}"
+    return True, "entry restored (mode+oid verified)"
 
 
 def installed_version(dev, pkg):
@@ -1092,7 +1117,7 @@ def main():
         out_dir.mkdir(exist_ok=True)
         cfg_path = PROJECTS / repo / "export_presets.cfg"
         cfg_backup = None
-        idx_backup = None
+        idx_backup = "unset"
         try:
             if not (PROJECTS / repo).exists():
                 raise ReleaseError("repo missing on disk")
@@ -1107,7 +1132,7 @@ def main():
                 ver, code = read_version(repo)
             else:
                 cfg_backup = cfg_path.read_bytes()
-                idx_backup = index_blob_bytes(repo)
+                idx_backup = index_entry(repo)   # fail-closed BEFORE bump
                 ver, code = bump_patch(repo)
             rec.update(version=ver, version_code=code)
             tag = f"v{ver}"
@@ -1167,18 +1192,24 @@ def main():
             # Any exception fails THIS game only. Roll back an uncommitted
             # bump so the worktree stays clean for the next bot/run.
             if cfg_backup is not None and not rec.get("version_committed"):
-                # Cleanup must never raise out of the per-game handler:
-                # isolate the index restore (its subprocess timeout is not
-                # OSError) and the file restore independently.
-                try:
-                    if restore_index(repo, idx_backup):
-                        log("  rollback: index state restored")
-                    else:
-                        log("  rollback: index restore FAILED "
-                            "(worktree restore still attempted)")
-                except Exception as re:
-                    log(f"  rollback: index restore raised "
-                        f"{type(re).__name__}: {re}")
+                # Cleanup must never raise out of the per-game handler.
+                # Index restore only runs when the snapshot SUCCEEDED
+                # ("unset" = unknown original state -> leave index alone).
+                if idx_backup != "unset":
+                    try:
+                        ok_i, det_i = restore_index(repo, idx_backup)
+                        rec["rollback_index"] = det_i
+                        if ok_i:
+                            log(f"  rollback: index state restored ({det_i})")
+                        else:
+                            log(f"  rollback: index restore FAILED: {det_i}")
+                    except Exception as re:
+                        rec["rollback_index"] = f"{type(re).__name__}: {re}"
+                        log(f"  rollback: index restore raised "
+                            f"{type(re).__name__}: {re}")
+                else:
+                    log("  rollback: index snapshot unavailable -- index "
+                        "left untouched (fail-closed)")
                 try:
                     # raw bytes restore: read_text/write_text would normalize
                     # CRLF on Windows and make the read-back compare lie.
