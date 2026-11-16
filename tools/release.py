@@ -390,11 +390,11 @@ def gh_api(path, method="GET", payload=None, raw_body=None, content_type=None,
         return e.code, e.read().decode("utf-8", "replace")
 
 
-def release_notes(repo, tag, prev_tag):
+def release_notes(repo, tag, prev_tag, head=None):
     rng = f"{prev_tag}..HEAD" if prev_tag else "HEAD"
     _, out = run(["git", "log", "--oneline", "--no-decorate", rng], cwd=PROJECTS / repo)
     lines = [l for l in out.splitlines() if l.strip()][:12]
-    head = git_head(repo)
+    head = head or git_head(repo)
     body = [f"Built from `{head}` (current main), arm64, debug-signed.", ""]
     if lines:
         body.append("Changes since " + (f"`{prev_tag}`" if prev_tag else "the start") + ":")
@@ -403,13 +403,19 @@ def release_notes(repo, tag, prev_tag):
     return "\n".join(body)
 
 
-def publish(dev, repo, tag, apk, size, out_dir, notes):
+def publish(dev, repo, tag, apk, size, out_dir, notes=None):
     d = PROJECTS / repo
     # commit the version bump so the tagged tree matches the built APK
     run(["git", "add", "export_presets.cfg"], cwd=d, check=True)
     rc, out = run(["git", "commit", "-m", f"chore(release): {tag}"], cwd=d)
     if rc != 0 and "nothing to commit" not in out:
         raise ReleaseError(f"version commit failed: {out[-400:]}")
+    # notes are written from the committed build state, not the parent
+    run(["git", "fetch", "--tags", "--quiet"], cwd=d, timeout=300)
+    if notes is None:
+        _, tags = run(["git", "tag", "--sort=-creatordate"], cwd=d)
+        prev = [t for t in tags.split() if t and t != tag][:1]
+        notes = release_notes(repo, tag, prev[0] if prev else None, head=git_head(repo))
     # tag + push
     rc, out = run(["git", "tag", "-a", tag, "-m", f"{GAMES[repo]['title']} {tag}"], cwd=d)
     if rc != 0 and "already exists" not in out:
@@ -614,12 +620,7 @@ def main():
             rec["smoke"] = smoke(dev, repo, recipes[repo], out_dir)
 
             if args.publish:
-                prev = None
-                _, tags = run(["git", "tag", "--sort=-creatordate"], cwd=PROJECTS / repo)
-                prev = [t for t in tags.split() if t and t != tag][:1]
-                prev = prev[0] if prev else None
-                rec["publish"] = publish(dev, repo, tag, apk, size, out_dir,
-                                         release_notes(repo, tag, prev))
+                rec["publish"] = publish(dev, repo, tag, apk, size, out_dir)
             rec["ok"] = True
             log(f"  PASS {repo} v{ver}")
         except ReleaseError as e:
