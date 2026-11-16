@@ -416,9 +416,10 @@ def _stick_mag(s):
 
 ALLOWED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
                      "pos_delta_min", "stick_settle_max"}
-# Minimum strength for a declared spec: run gate + monotonic timer + input
-# reaching the control + the release negative control. A weak spec (e.g. only
-# require_running) must not earn touch_pass. pos_delta_min is recommended.
+# Minimum strength for a declared spec: ALL FIVE keys are mandatory -- run
+# gate + monotonic timer + input reaching the control + displacement during
+# active input + the release negative control. A weak spec (e.g. only
+# require_running, or omitting pos_delta_min) must not earn touch_pass.
 REQUIRED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
                       "stick_settle_max", "pos_delta_min"}
 
@@ -449,21 +450,31 @@ def validate_spec_values(spec):
                            f">= 0.1 world units (got {d!r})")
 
 
-def state_checks(samples, spec, drags=None, end_dev=None):
+def state_checks(samples, spec, drags=None, end_dev=None, unc=0.1, ts_max=None):
     """A6 assertions over the parsed [CYKTEST] series. Returns a list of
     {name, ok, detail}. Causal-chain requirements (no cross-phase stitching):
       - run gate passed; HUD timer monotonic DURING the run
       - stick input reached the control DURING the run, and (when the drag
-        timeline is available) inside each actual injection window
-      - player displaced DURING the run (max excursion from the first running
-        sample; a fall+respawn does not erase the evidence)
+        timeline is available) strictly INSIDE each injection window interior
+        (clock uncertainty shrinks the window; tolerance alone never counts)
+      - player displaced WHILE INPUT WAS ACTIVE (excursion across active-stick
+        running samples; motion after release is not input evidence)
       - stick settles to zero on a FRESH sample after the last release, and
-        telemetry is still alive at recipe end (a channel that died mid-recipe
-        cannot prove the release -- negative control).
-    drags: injection windows in DEVICE epoch seconds (host timeline aligned
-    via the device clock). end_dev: device epoch at recipe end."""
+        telemetry is still alive at recipe end (negative control).
+    Series sanity: timestamps must be non-decreasing and not in the future
+    relative to the collection clock (ts_max) -- a forged 1e300 ts cannot
+    fake freshness. drags/end_dev/ts_max are DEVICE epoch seconds; unc is the
+    clock alignment uncertainty (seconds)."""
     play = [s for s in samples if s.get("scene") == "play"]
     running = [s for s in play if s.get("running")]
+    ts_all = [float(s["ts"]) for s in samples]
+    if any(b < a - 0.001 for a, b in zip(ts_all, ts_all[1:])):
+        raise ReleaseError("A6: telemetry timestamps out of order -- "
+                           "corrupt series, refusing to assert")
+    if ts_max is not None and any(t > ts_max for t in ts_all):
+        raise ReleaseError(f"A6: telemetry timestamp in the future "
+                           f"(max={max(ts_all):.2f} > collection ceiling "
+                           f"{ts_max:.2f}) -- forged/corrupt clock")
     checks = []
 
     def add(name, ok, detail):
@@ -483,8 +494,8 @@ def state_checks(samples, spec, drags=None, end_dev=None):
         add("timer_monotonic_increase", False,
             f"only {len(times)} running samples")
 
-    # stick + displacement are measured ONLY inside the run episode: input
-    # before the gate, or motion while not running, is not gameplay evidence.
+    # stick is measured ONLY inside the run episode: input before the gate,
+    # or motion while not running, is not gameplay evidence.
     mags = [_stick_mag(s) for s in running]
     peak = max(mags) if mags else 0.0
     active = sum(1 for m in mags if m >= float(spec["stick_peak_min"]))
@@ -492,27 +503,37 @@ def state_checks(samples, spec, drags=None, end_dev=None):
         peak >= float(spec["stick_peak_min"]) and active >= 3,
         f"peak={peak:.3f} running_samples_above_threshold={active}")
 
-    poss = [s["pos"] for s in running]
-    if len(poss) >= 2:
+    # displacement must happen WHILE INPUT IS ACTIVE (causal, not just
+    # "somewhere during the run"): excursion across active-stick samples.
+    act = [s for s in running
+           if _stick_mag(s) >= float(spec["stick_peak_min"])]
+    if len(act) >= 2:
+        poss = [s["pos"] for s in act]
         d = max(sum((float(x) - float(y)) ** 2
                     for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
         add("player_displacement", d >= float(spec["pos_delta_min"]),
-            f"max excursion from first running sample={d:.2f}")
+            f"excursion during active input={d:.2f} ({len(act)} samples)")
     else:
-        add("player_displacement", False, f"only {len(poss)} running samples")
+        add("player_displacement", False,
+            f"only {len(act)} active-input running samples")
 
-    # per-drag coverage: every injection window must show active stick input
+    # per-drag coverage: active samples strictly INSIDE the window interior.
+    # The uncertainty margin shrinks the window; samples in the tolerance
+    # band alone can never satisfy coverage (no pre-input alibi).
     if drags:
         covered = 0
         for (t0, t1) in drags:
-            win = [s for s in running
-                   if t0 - 0.3 <= float(s["ts"]) <= t1 + 0.3]
+            lo, hi = t0 + unc, t1 - unc
+            if hi <= lo:
+                continue        # window too short to prove -- not covered
+            win = [s for s in running if lo <= float(s["ts"]) <= hi]
             n_act = sum(1 for s in win
                         if _stick_mag(s) >= float(spec["stick_peak_min"]))
             if n_act >= 2:
                 covered += 1
         add("drag_windows_covered", covered == len(drags),
-            f"{covered}/{len(drags)} windows with >=2 active running samples")
+            f"{covered}/{len(drags)} windows with >=2 active samples inside "
+            f"the interior (unc={unc:.2f}s)")
 
     # settle: fresh sample after the last release + channel alive at the end
     if play:
@@ -536,14 +557,18 @@ def state_checks(samples, spec, drags=None, end_dev=None):
     return checks
 
 
-def device_epoch(dev):
-    """Device unix clock (for aligning the host injection timeline with
-    telemetry ts). None when unreadable -- callers decide fail-closed."""
+def device_clock_sample(dev):
+    """Bracketed device-clock read: host midpoint cancels symmetric ADB
+    one-way latency; rtt bounds the alignment uncertainty. None when the
+    clock is unreadable -- callers decide fail-closed."""
+    h0 = time.time()
     out = dev.adb("shell", "date", "+%s.%N")
+    h1 = time.time()
     try:
-        return float(out.strip())
+        d = float(out.strip())
     except (ValueError, TypeError):
         return None
+    return dict(dev=d, host=(h0 + h1) / 2.0, rtt=h1 - h0)
 
 
 def smoke(dev, repo, recipe, out_dir):
@@ -579,12 +604,10 @@ def smoke(dev, repo, recipe, out_dir):
 
     shots = {}
     timeline = {}
-    t0_host = time.time()
-    t0_dev = device_epoch(dev)
+    c0 = device_clock_sample(dev)
     for i, step in enumerate(recipe["steps"]):
         do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}", timeline)
-    t1_host = time.time()
-    t1_dev = device_epoch(dev)
+    c1 = device_clock_sample(dev)
     evidence["input_timeline"] = timeline
     for key in ("gp1", "gp2"):
         if key not in shots:
@@ -628,14 +651,26 @@ def smoke(dev, repo, recipe, out_dir):
             raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
                                "has no state_assert spec")
         # Align the host injection timeline with device telemetry timestamps.
-        if t0_dev is None or t1_dev is None:
+        # Bracketed clock reads: offset uses the host midpoint (cancels
+        # symmetric ADB latency); rtt/2 bounds the uncertainty used for the
+        # drag-window interior and the timestamp sanity ceiling.
+        if c0 is None or c1 is None:
             raise ReleaseError("A6: device clock unreadable -- cannot align "
                                "drag timeline / verify telemetry freshness")
-        offset = ((t0_dev - t0_host) + (t1_dev - t1_host)) / 2.0
+        c2 = device_clock_sample(dev)      # clock at telemetry collection
+        if c2 is None:
+            raise ReleaseError("A6: device clock unreadable at collection")
+        if max(c0["rtt"], c1["rtt"], c2["rtt"]) > 4.0:
+            raise ReleaseError("A6: device clock query too slow (>4s RTT) -- "
+                               "alignment untrustworthy")
+        offset = ((c0["dev"] - c0["host"]) + (c1["dev"] - c1["host"])) / 2.0
+        unc = max(c0["rtt"], c1["rtt"], c2["rtt"]) / 2.0 + 0.05
         drags_dev = [[a + offset, b + offset]
                      for a, b in timeline.get("drags", [])]
+        ts_max = c2["dev"] + c2["rtt"] / 2.0 + 0.5
         evidence["clock_offset"] = round(offset, 3)
-        checks = state_checks(samples, spec, drags_dev, t1_dev)
+        evidence["clock_uncertainty"] = round(unc, 3)
+        checks = state_checks(samples, spec, drags_dev, c1["dev"], unc, ts_max)
         if not checks:
             raise ReleaseError("A6: state_assert produced zero checks -- "
                                "refusing vacuous touch_pass")
