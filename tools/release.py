@@ -420,6 +420,33 @@ REQUIRED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
                       "stick_settle_max"}
 
 
+def validate_spec_values(spec):
+    """Key presence is not strength: the VALUES must be meaningful, or a
+    spec like {require_running: false, time_increase_min: 0, stick_peak_min: 0,
+    stick_settle_max: 1e300} would let a fully static series earn touch_pass.
+    Stick output is normalized to [-1,1]; thresholds live in that domain."""
+    if spec["require_running"] is not True:
+        raise ReleaseError("A6: require_running must be true (the run gate "
+                           "cannot be disabled)")
+    t = spec["time_increase_min"]
+    if not _finite_num(t) or t < 1.0:
+        raise ReleaseError(f"A6: time_increase_min must be a finite number "
+                           f">= 1.0s (got {t!r})")
+    p = spec["stick_peak_min"]
+    if not _finite_num(p) or not (0.1 <= p <= 1.0):
+        raise ReleaseError(f"A6: stick_peak_min must be within [0.1, 1.0] "
+                           f"(normalized stick domain, got {p!r})")
+    s = spec["stick_settle_max"]
+    if not _finite_num(s) or not (0.0 <= s < p):
+        raise ReleaseError(f"A6: stick_settle_max must be finite, >= 0 and "
+                           f"strictly below stick_peak_min ({p!r}); got {s!r}")
+    if "pos_delta_min" in spec:
+        d = spec["pos_delta_min"]
+        if not _finite_num(d) or d < 0.1:
+            raise ReleaseError(f"A6: pos_delta_min must be a finite number "
+                               f">= 0.1 world units (got {d!r})")
+
+
 def state_checks(samples, spec):
     """A6 assertions over the parsed [CYKTEST] series. Returns a list of
     {name, ok, detail}. The series covers the whole smoke window; the recipe
@@ -548,6 +575,7 @@ def smoke(dev, repo, recipe, out_dir):
         if missing:
             raise ReleaseError(f"A6: state_assert below minimum strength, "
                                f"missing keys {sorted(missing)}")
+        validate_spec_values(spec)
     if samples:
         if not declared:
             raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
