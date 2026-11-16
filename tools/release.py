@@ -365,11 +365,20 @@ def _valid_sample(d):
         return True
     if not isinstance(d.get("running"), bool):
         return False
-    if not _finite_num(d.get("time")):
+    t = d.get("time")
+    if not _finite_num(t) or t < -1e-9:
         return False
     st = d.get("stick")
     if not (isinstance(st, list) and len(st) == 2
             and all(_finite_num(v) for v in st)):
+        return False
+    # stick is a normalized control: components and magnitude in [-1,1].
+    # CykTest snaps to 0.001, which can round the magnitude up to ~1.0013,
+    # so allow 1% tolerance. An impossible value like 1e154 or 1.5 is
+    # corrupt, not "very strong input".
+    if any(abs(v) > 1.0 + 0.01 for v in st):
+        return False
+    if (st[0] ** 2 + st[1] ** 2) ** 0.5 > 1.0 + 0.01:
         return False
     pos = d.get("pos")
     if not (isinstance(pos, list) and len(pos) == 3
@@ -1125,19 +1134,26 @@ def main():
             # Any exception fails THIS game only. Roll back an uncommitted
             # bump so the worktree stays clean for the next bot/run.
             if cfg_backup is not None and not rec.get("version_committed"):
+                # Cleanup must never raise out of the per-game handler:
+                # isolate the reset (its subprocess timeout is not OSError)
+                # and the file restore independently.
                 try:
                     rc_r, out_r = run(["git", "reset", "-q", "--",
                                        "export_presets.cfg"], cwd=PROJECTS / repo)
                     if rc_r != 0:
                         log(f"  rollback: git reset failed rc={rc_r}: "
                             f"{out_r.strip()[-200:]}")
+                except Exception as re:
+                    log(f"  rollback: git reset raised "
+                        f"{type(re).__name__}: {re}")
+                try:
                     cfg_path.write_text(cfg_backup, encoding="utf-8")
                     if cfg_path.read_bytes() != cfg_backup.encode("utf-8"):
                         log("  rollback FAILED: read-back mismatch")
                     else:
                         log("  rollback: export_presets.cfg restored to pre-bump")
-                except OSError as re:
-                    log(f"  rollback FAILED: {re}")
+                except Exception as re:
+                    log(f"  rollback FAILED: {type(re).__name__}: {re}")
             rec["ok"] = False
             rec["error"] = f"{type(e).__name__}: {e}"
             failures.append((repo, rec["error"]))
