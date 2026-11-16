@@ -354,7 +354,10 @@ def _valid_sample(d):
     """Schema gate for [CYKTEST] payloads. Missing/wrong-typed fields are
     malformed, NEVER silently coerced to success values (an unobserved stick
     is not an observed zero; running must be a real boolean; vectors must be
-    fixed-dimension finite numbers)."""
+    fixed-dimension finite numbers; ts must be a finite epoch for timeline
+    alignment)."""
+    if not _finite_num(d.get("ts")):
+        return False
     scene = d.get("scene")
     if scene not in ("play", "select"):
         return False
@@ -417,7 +420,7 @@ ALLOWED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
 # reaching the control + the release negative control. A weak spec (e.g. only
 # require_running) must not earn touch_pass. pos_delta_min is recommended.
 REQUIRED_SPEC_KEYS = {"require_running", "time_increase_min", "stick_peak_min",
-                      "stick_settle_max"}
+                      "stick_settle_max", "pos_delta_min"}
 
 
 def validate_spec_values(spec):
@@ -440,67 +443,107 @@ def validate_spec_values(spec):
     if not _finite_num(s) or not (0.0 <= s < p):
         raise ReleaseError(f"A6: stick_settle_max must be finite, >= 0 and "
                            f"strictly below stick_peak_min ({p!r}); got {s!r}")
-    if "pos_delta_min" in spec:
-        d = spec["pos_delta_min"]
-        if not _finite_num(d) or d < 0.1:
-            raise ReleaseError(f"A6: pos_delta_min must be a finite number "
-                               f">= 0.1 world units (got {d!r})")
+    d = spec["pos_delta_min"]
+    if not _finite_num(d) or d < 0.1:
+        raise ReleaseError(f"A6: pos_delta_min must be a finite number "
+                           f">= 0.1 world units (got {d!r})")
 
 
-def state_checks(samples, spec):
+def state_checks(samples, spec, drags=None, end_dev=None):
     """A6 assertions over the parsed [CYKTEST] series. Returns a list of
-    {name, ok, detail}. The series covers the whole smoke window; the recipe
-    only injects stick drags, so stick activity is attributable to the
-    harness. stick_settles_after_release is the negative control (no input ->
-    zero output)."""
+    {name, ok, detail}. Causal-chain requirements (no cross-phase stitching):
+      - run gate passed; HUD timer monotonic DURING the run
+      - stick input reached the control DURING the run, and (when the drag
+        timeline is available) inside each actual injection window
+      - player displaced DURING the run (max excursion from the first running
+        sample; a fall+respawn does not erase the evidence)
+      - stick settles to zero on a FRESH sample after the last release, and
+        telemetry is still alive at recipe end (a channel that died mid-recipe
+        cannot prove the release -- negative control).
+    drags: injection windows in DEVICE epoch seconds (host timeline aligned
+    via the device clock). end_dev: device epoch at recipe end."""
     play = [s for s in samples if s.get("scene") == "play"]
+    running = [s for s in play if s.get("running")]
     checks = []
 
     def add(name, ok, detail):
         checks.append(dict(name=name, ok=bool(ok), detail=detail))
 
-    running = [s for s in play if s.get("running")]
-    if spec.get("require_running"):
-        add("run_gate", len(running) > 0,
-            f"{len(running)}/{len(play)} play samples running")
-    if "time_increase_min" in spec:
-        times = [float(s.get("time", 0.0)) for s in running]
-        if len(times) >= 2:
-            inc = times[-1] - times[0]
-            mono = all(b >= a - 0.05 for a, b in zip(times, times[1:]))
-            add("timer_monotonic_increase",
-                mono and inc >= float(spec["time_increase_min"]),
-                f"increase={inc:.2f}s monotonic={mono} samples={len(times)}")
-        else:
-            add("timer_monotonic_increase", False,
-                f"only {len(times)} running samples")
-    if "stick_peak_min" in spec:
-        mags = [_stick_mag(s) for s in play]
-        peak = max(mags) if mags else 0.0
-        active = sum(1 for m in mags if m >= float(spec["stick_peak_min"]))
-        add("stick_input_reached",
-            peak >= float(spec["stick_peak_min"]) and active >= 3,
-            f"peak={peak:.3f} samples_above_threshold={active}")
-    if "pos_delta_min" in spec:
-        poss = [s.get("pos") for s in play if s.get("pos")]
-        if len(poss) >= 2:
-            # Max excursion from the first sample: a fall+respawn must not
-            # erase the evidence that input moved the player.
-            d = max(sum((float(x) - float(y)) ** 2
-                        for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
-            add("player_displacement", d >= float(spec["pos_delta_min"]),
-                f"max excursion from first sample={d:.2f}")
-        else:
-            add("player_displacement", False, f"only {len(poss)} pos samples")
-    if "stick_settle_max" in spec:
-        if play:
-            m = _stick_mag(play[-1])
-            add("stick_settles_after_release",
-                m <= float(spec["stick_settle_max"]),
-                f"last sample |stick|={m:.3f}")
-        else:
-            add("stick_settles_after_release", False, "no play samples")
+    add("run_gate", len(running) > 0,
+        f"{len(running)}/{len(play)} play samples running")
+
+    times = [float(s["time"]) for s in running]
+    if len(times) >= 2:
+        inc = times[-1] - times[0]
+        mono = all(b >= a - 0.05 for a, b in zip(times, times[1:]))
+        add("timer_monotonic_increase",
+            mono and inc >= float(spec["time_increase_min"]),
+            f"increase={inc:.2f}s monotonic={mono} samples={len(times)}")
+    else:
+        add("timer_monotonic_increase", False,
+            f"only {len(times)} running samples")
+
+    # stick + displacement are measured ONLY inside the run episode: input
+    # before the gate, or motion while not running, is not gameplay evidence.
+    mags = [_stick_mag(s) for s in running]
+    peak = max(mags) if mags else 0.0
+    active = sum(1 for m in mags if m >= float(spec["stick_peak_min"]))
+    add("stick_input_reached",
+        peak >= float(spec["stick_peak_min"]) and active >= 3,
+        f"peak={peak:.3f} running_samples_above_threshold={active}")
+
+    poss = [s["pos"] for s in running]
+    if len(poss) >= 2:
+        d = max(sum((float(x) - float(y)) ** 2
+                    for x, y in zip(poss[0], q)) ** 0.5 for q in poss)
+        add("player_displacement", d >= float(spec["pos_delta_min"]),
+            f"max excursion from first running sample={d:.2f}")
+    else:
+        add("player_displacement", False, f"only {len(poss)} running samples")
+
+    # per-drag coverage: every injection window must show active stick input
+    if drags:
+        covered = 0
+        for (t0, t1) in drags:
+            win = [s for s in running
+                   if t0 - 0.3 <= float(s["ts"]) <= t1 + 0.3]
+            n_act = sum(1 for s in win
+                        if _stick_mag(s) >= float(spec["stick_peak_min"]))
+            if n_act >= 2:
+                covered += 1
+        add("drag_windows_covered", covered == len(drags),
+            f"{covered}/{len(drags)} windows with >=2 active running samples")
+
+    # settle: fresh sample after the last release + channel alive at the end
+    if play:
+        last = play[-1]
+        m = _stick_mag(last)
+        fresh = True
+        fdetail = ""
+        if drags:
+            last_up = max(t1 for _, t1 in drags)
+            fresh = float(last["ts"]) >= last_up + 0.2
+            fdetail = f"last_ts={float(last['ts']):.2f} last_up={last_up:.2f}"
+        if end_dev is not None:
+            alive = float(last["ts"]) >= end_dev - 1.0
+            fresh = fresh and alive
+            fdetail += f" recipe_end={end_dev:.2f}"
+        add("stick_settles_after_release",
+            m <= float(spec["stick_settle_max"]) and fresh,
+            f"last |stick|={m:.3f} fresh={fresh} {fdetail}")
+    else:
+        add("stick_settles_after_release", False, "no play samples")
     return checks
+
+
+def device_epoch(dev):
+    """Device unix clock (for aligning the host injection timeline with
+    telemetry ts). None when unreadable -- callers decide fail-closed."""
+    out = dev.adb("shell", "date", "+%s.%N")
+    try:
+        return float(out.strip())
+    except (ValueError, TypeError):
+        return None
 
 
 def smoke(dev, repo, recipe, out_dir):
@@ -536,8 +579,12 @@ def smoke(dev, repo, recipe, out_dir):
 
     shots = {}
     timeline = {}
+    t0_host = time.time()
+    t0_dev = device_epoch(dev)
     for i, step in enumerate(recipe["steps"]):
         do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}", timeline)
+    t1_host = time.time()
+    t1_dev = device_epoch(dev)
     evidence["input_timeline"] = timeline
     for key in ("gp1", "gp2"):
         if key not in shots:
@@ -580,7 +627,15 @@ def smoke(dev, repo, recipe, out_dir):
         if not declared:
             raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
                                "has no state_assert spec")
-        checks = state_checks(samples, spec)
+        # Align the host injection timeline with device telemetry timestamps.
+        if t0_dev is None or t1_dev is None:
+            raise ReleaseError("A6: device clock unreadable -- cannot align "
+                               "drag timeline / verify telemetry freshness")
+        offset = ((t0_dev - t0_host) + (t1_dev - t1_host)) / 2.0
+        drags_dev = [[a + offset, b + offset]
+                     for a, b in timeline.get("drags", [])]
+        evidence["clock_offset"] = round(offset, 3)
+        checks = state_checks(samples, spec, drags_dev, t1_dev)
         if not checks:
             raise ReleaseError("A6: state_assert produced zero checks -- "
                                "refusing vacuous touch_pass")
@@ -993,6 +1048,8 @@ def main():
             # bump so the worktree stays clean for the next bot/run.
             if cfg_backup is not None and not rec.get("version_committed"):
                 try:
+                    run(["git", "reset", "-q", "--", "export_presets.cfg"],
+                        cwd=PROJECTS / repo)
                     cfg_path.write_text(cfg_backup, encoding="utf-8")
                     log("  rollback: export_presets.cfg restored to pre-bump")
                 except OSError as re:
