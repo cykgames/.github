@@ -13,7 +13,10 @@ Hard asserts:
   A3 gameplay reached + live: gameplay frame differs from the title frame and
      the world/HUD animates. PIXEL EVIDENCE ONLY -- proves liveness, NEVER a
      touch pass by itself.
-  A4 crash-free: neither the crash buffer nor AndroidRuntime:E has a FATAL
+  A4 crash-free: PID-attributed scan of main+system+crash buffers for FATAL
+     EXCEPTION (Process: exact pkg), ANR in <pkg>, and GDScript SCRIPT ERROR
+     (target PID generations, never tag/time alone); read integrity tri-state
+     (ok/overflow/failed), chatty overflow and malformed target markers fail
   A5 publish integrity: GitHub release asset size == local APK size
   A6 touch state (when the game emits [CYKTEST] telemetry): the parsed logcat
      state series must satisfy the recipe's state_assert spec (run gate
@@ -377,10 +380,107 @@ def activity_package(line):
     return m.group(1) if m else None
 
 
-def crash_log(dev):
-    out = dev.adb("logcat", "-d", "-b", "crash")
-    out += dev.adb("logcat", "-d", "-s", "AndroidRuntime:E")
-    return out
+# --------------------------------------------------------------------------- #
+# A4 crash scan (W4: PID-attributed, main+system+crash, SCRIPT ERROR + ANR)
+# --------------------------------------------------------------------------- #
+# threadtime: "MM-DD HH:MM:SS.mmm  PID  TID L TAG: message". Tag may contain
+# spaces/colons; split at the FIRST ": " after the level letter. Attribution
+# is by target PID set (generations across restarts), NEVER by tag alone
+# (Godot's logcat tag is unstable across versions) and never by time window
+# alone (concurrent Godot apps share the interval). FATAL additionally uses
+# the AndroidRuntime "Process: <pkg>" line with EXACT package token match
+# (similar prefixes must not convict). ANR is attributed by the exact package
+# token in "ANR in <pkg>" (ActivityManager writes it, pid is system_server).
+_THREADTIME_RE = re.compile(
+    r"^\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+(\d+)\s+(\d+)\s+"
+    r"([VDIWEF])\s+(.*?):\s?(.*)$")
+_PROCESS_RE = re.compile(r"Process:\s*([^\s,]+)")
+_ANR_RE = re.compile(r"ANR in\s+([^\s(]+)")
+
+
+def parse_crash_log(text, pkg, pids):
+    """Pure parser. pids: iterable of target-process PIDs (all generations).
+    Empty/None pids => conservative: ANY SCRIPT ERROR is attributed (fail-
+    closed; an unknown producer is not proof of innocence). Unrelated
+    malformed main-buffer lines are ignored; a malformed line carrying a
+    target marker (FATAL/ANR/SCRIPT ERROR) cannot be attributed => fail.
+    chatty overflow => fail (evidence may be lost)."""
+    pids = set(int(p) for p in (pids or []))
+    pid_unknown = not pids
+    fatal, anr, script_errors, malformed = [], [], [], []
+    foreign = dict(fatal=0, anr=0, script_errors=0)
+    overflow = False
+    process_by_pid = {}
+    records = []
+    for line in text.splitlines():
+        if "chatty" in line and ("expire" in line or "identical" in line):
+            overflow = True
+        m = _THREADTIME_RE.match(line)
+        if not m:
+            if ("FATAL EXCEPTION" in line or "SCRIPT ERROR" in line
+                    or "ANR in" in line):
+                malformed.append(line.strip()[:200])
+            continue
+        pid, tid, level, tag, msg = (int(m.group(1)), int(m.group(2)),
+                                     m.group(3), m.group(4), m.group(5))
+        records.append((pid, tag, msg, line))
+        pm = _PROCESS_RE.search(msg)
+        if pm:
+            process_by_pid.setdefault(pid, set()).add(pm.group(1))
+    for pid, tag, msg, line in records:
+        if "FATAL EXCEPTION" in msg:
+            mine = pid in pids or pkg in process_by_pid.get(pid, set())
+            if mine:
+                fatal.append(dict(pid=pid, line=line.strip()[:200]))
+            else:
+                foreign["fatal"] += 1
+        am = _ANR_RE.search(msg)
+        if am:
+            if am.group(1) == pkg:
+                anr.append(dict(pid=pid, line=line.strip()[:200]))
+            else:
+                foreign["anr"] += 1
+        if "SCRIPT ERROR" in msg:
+            if pid in pids or pid_unknown:
+                script_errors.append(dict(pid=pid, line=line.strip()[:200]))
+            else:
+                foreign["script_errors"] += 1
+    clean = not (fatal or anr or script_errors or malformed or overflow)
+    return dict(clean=clean, fatal=fatal, anr=anr, script_errors=script_errors,
+                malformed_target=malformed, overflow=overflow,
+                pid_unknown_conservative=pid_unknown, foreign=foreign)
+
+
+def crash_scan(dev, pkg, pids):
+    """Collect main+system+crash with threadtime, parse with PID attribution.
+    Read integrity is tri-state: ok / overflow / failed (a failed or truncated
+    read is NEVER a clean pass). Falls back to main,crash only if the device
+    rejects the system buffer (recorded)."""
+    base = [str(ADB), "-s", dev.serial, "logcat", "-d", "-v", "threadtime"]
+    rc, out, err = run_split(base + ["-b", "main,system,crash"], timeout=120)
+    buffers = "main,system,crash"
+    if rc != 0 or "Unable to open" in out or "invalid buffer" in (out + err):
+        rc, out, err = run_split(base + ["-b", "main,crash"], timeout=120)
+        buffers = "main,crash(fallback)"
+    if rc != 0:
+        return dict(clean=False, read_integrity="failed", buffers=buffers,
+                    fatal=[], anr=[], script_errors=[], malformed_target=[],
+                    overflow=False, pid_unknown_conservative=not pids,
+                    foreign=dict(fatal=0, anr=0, script_errors=0),
+                    pid_generations=sorted(set(int(p) for p in (pids or []))),
+                    tail=(out + err).strip().splitlines()[-6:],
+                    error=f"logcat rc={rc}: {(out + err)[-400:]}")
+    parsed = parse_crash_log(out, pkg, pids)
+    parsed["read_integrity"] = "overflow" if parsed["overflow"] else "ok"
+    parsed["buffers"] = buffers
+    parsed["pid_generations"] = sorted(set(int(p) for p in (pids or [])))
+    parsed["tail"] = out.strip().splitlines()[-6:]
+    return parsed
+
+
+def target_pids(dev, pkg):
+    out = dev.adb("shell", "pidof", pkg)
+    return [int(t) for t in out.split() if t.isdigit()]
 
 
 def do_step(dev, step, w, h, shots, out_dir, label, timeline=None):
@@ -703,6 +803,7 @@ def smoke(dev, repo, recipe, out_dir):
     dev.adb("logcat", "-c")
     dev.adb("shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
     time.sleep(float(recipe.get("launch_wait", 9)))
+    pids = target_pids(dev, pkg)   # W4: first PID generation for attribution
 
     evidence = {}
     # A1 foreground (exact package equality, never substring)
@@ -850,12 +951,27 @@ def smoke(dev, repo, recipe, out_dir):
             raise ReleaseError("A3 gameplay: " + "; ".join(pixel_problems)
                                + " -- never reached a live gameplay frame")
 
-    # A4 crash free
-    crashes = crash_log(dev)
-    evidence["crash_buffer_clean"] = "FATAL EXCEPTION" not in crashes and "ANR in" not in crashes
-    evidence["crash_tail"] = crashes.strip().splitlines()[-6:] if crashes.strip() else []
-    if not evidence["crash_buffer_clean"]:
-        raise ReleaseError(f"A4 crash: FATAL/ANR in buffers\n{crashes[-800:]}")
+    # A4 crash free (W4: PID-attributed FATAL/ANR/SCRIPT ERROR across
+    # main+system+crash; read integrity tri-state; restart generations union)
+    pids = sorted(set(pids) | set(target_pids(dev, pkg)))
+    scan = crash_scan(dev, pkg, pids)
+    evidence["crash_buffer_clean"] = scan["clean"]
+    evidence["crash_tail"] = scan["tail"]
+    evidence["crash_scan"] = {k: scan[k] for k in (
+        "fatal", "anr", "script_errors", "malformed_target", "overflow",
+        "read_integrity", "buffers", "pid_generations",
+        "pid_unknown_conservative", "foreign")}
+    if not scan["clean"]:
+        detail = "; ".join(
+            [f"FATAL×{len(scan['fatal'])}", f"ANR×{len(scan['anr'])}",
+             f"SCRIPT_ERROR×{len(scan['script_errors'])}",
+             f"malformed×{len(scan['malformed_target'])}",
+             f"overflow={scan['overflow']}",
+             f"read={scan['read_integrity']}"])
+        raise ReleaseError(f"A4 crash: {detail}\n"
+                           + "\n".join(x["line"] for x in
+                                       scan["fatal"] + scan["anr"]
+                                       + scan["script_errors"])[-800:])
     dev.adb("shell", "am", "force-stop", pkg)
     evidence["ok"] = True
     return evidence
