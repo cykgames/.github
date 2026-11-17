@@ -66,6 +66,9 @@ from pathlib import Path
 
 from PIL import Image, ImageChops
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import l1_manifest  # noqa: E402  (W1 l1 qualification-suite manifest contract)
+
 HOME = Path.home()
 PROJECTS = HOME / "projects"
 ORG_DIR = PROJECTS / "cykgames-org"
@@ -987,6 +990,9 @@ def smoke(dev, repo, recipe, out_dir):
 TEST_FLAGS = {
     ("008-shmup", "headless_test.tscn"): ["--fixed-fps", "60"],
     ("009-shooter", "test_touch_events.tscn"): ["--fixed-fps", "60"],
+    # W1: every 002 test scene runs at fixed-fps 60 (LevelGen zero RNG +
+    # fixed-fps => deterministic planner replays; plan v4.17 W1).
+    ("002-obby", "*"): ["--fixed-fps", "60"],
 }
 
 
@@ -1000,27 +1006,116 @@ def headless_test_scenes(repo):
     return scenes
 
 
-def run_headless_tests(repo, out_dir):
-    scenes = headless_test_scenes(repo)
+def run_headless_tests(repo, out_dir, suite="default"):
+    """Run the headless gate filtered by suite (W1: default/l1/all).
+    test_levels_l1_*.tscn belong to the 'l1' qualification suite; all other
+    test scenes to 'default'. Each result records its suite; the caller binds
+    the repo HEAD sha into evidence."""
+    all_scenes = headless_test_scenes(repo)
+    scenes = [sc for sc in all_scenes
+              if suite == "all" or l1_manifest.scene_suite(sc.name) == suite]
     if not scenes:
-        log(f"  WARNING: {repo} has no headless test scenes under tools/")
+        if suite != "l1":
+            log(f"  WARNING: {repo} has no headless test scenes under tools/ (suite={suite})")
         return []
     run([GODOT, "--headless", "--path", PROJECTS / repo, "--import"], timeout=600)
     results = []
     for sc in scenes:
-        flags = TEST_FLAGS.get((repo, sc.name), [])
+        flags = TEST_FLAGS.get((repo, sc.name)) or TEST_FLAGS.get((repo, "*")) or []
         t0 = time.time()
         rc, out = run([GODOT, "--headless", *flags, "--path", PROJECTS / repo,
                        f"res://tools/{sc.name}"], timeout=420)
         (out_dir / f"headless_{sc.stem}.log").write_text(out, encoding="utf-8")
         dt = time.time() - t0
         results.append(dict(scene=sc.name, rc=rc, ok=(rc == 0),
-                            seconds=round(dt, 1)))
+                            seconds=round(dt, 1),
+                            suite=l1_manifest.scene_suite(sc.name)))
         if rc != 0:
             raise ReleaseError(f"headless test {sc.name} failed (rc={rc}), "
                                f"refusing to build\n{out[-1200:]}")
-        log(f"  headless {sc.name} PASS ({dt:.0f}s)")
+        log(f"  headless {sc.name} PASS ({dt:.0f}s, suite={l1_manifest.scene_suite(sc.name)})")
     return results
+
+
+def l1_publish_gate(repo, out_dir, ver, code, args, rec):
+    """W1 publish l1 qualification (plan v4.17 W1 / luna C3). For a repo that
+    has l1 scenes, --publish requires fresh l1 evidence: INLINE by default
+    (safest, no reuse ambiguity), or strict --l1-manifest reuse. Populates
+    rec['l1']. Repos without l1 scenes are untouched."""
+    d = PROJECTS / repo
+    scenes = l1_manifest.l1_scenes(d)
+    if not scenes:
+        return
+    head = git_head(repo)
+    if args.l1_manifest:
+        mp = Path(args.l1_manifest)
+        if not mp.exists():
+            raise ReleaseError(f"--l1-manifest missing: {mp}")
+        try:
+            man = json.loads(mp.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise ReleaseError(f"--l1-manifest unreadable: {e}")
+        try:
+            l1_manifest.validate_manifest(man, d, repo, ver, code, head)
+        except l1_manifest.ManifestError as e:
+            raise ReleaseError(f"l1 manifest reuse refused: {e}")
+        rec["l1"] = {"source": "manifest-reuse", "manifest_path": str(mp),
+                     "manifest": man}
+        log(f"  l1 manifest reuse OK (head {head}, {len(scenes)} scenes)")
+        return
+    # inline fresh l1 run on the post-bump tree
+    results = run_headless_tests(repo, out_dir, suite="l1")
+    man = l1_manifest.produce_manifest(d, repo, head, ver, code, results,
+                                       allow_dirty=args.allow_dirty)
+    if not man["all_pass"]:
+        raise ReleaseError("inline l1 suite did not fully PASS")
+    rec["l1"] = {"source": "inline", "manifest": man}
+    if args.emit_l1_manifest:
+        Path(args.emit_l1_manifest).write_text(json.dumps(man, indent=2),
+                                               encoding="utf-8")
+        log(f"  l1 manifest emitted -> {args.emit_l1_manifest}")
+    log(f"  l1 inline PASS (head {head}, {len(scenes)} scenes, "
+        f"producer_clean={man['producer_clean']})")
+
+
+def require_l1_evidence(repo, rec):
+    """W1 publish guard: a repo with l1 scenes must carry l1 evidence.
+    l1 (headless GDScript suite) and mt (device L2) evidence never substitute
+    for each other (G-m9). Raises ReleaseError when missing."""
+    if l1_manifest.l1_scenes(PROJECTS / repo) and not rec.get("l1"):
+        raise ReleaseError(f"{repo} publish requires l1 qualification evidence "
+                           "(inline --suite l1 or a strictly bound "
+                           "--l1-manifest); none present")
+
+
+def emit_l1_standalone(repo, out_dir, path):
+    """--emit-l1-manifest without --publish: bump -> run l1 -> write manifest
+    at the bumped version -> roll the bump back so HEAD stays clean for a
+    later consumer publish that bumps to the same version."""
+    d = PROJECTS / repo
+    if not l1_manifest.l1_scenes(d):
+        raise ReleaseError(f"{repo} has no l1 scenes to emit a manifest for")
+    cfg_path = d / "export_presets.cfg"
+    cfg_backup = cfg_path.read_bytes()
+    idx_backup = index_entry(repo)
+    head = git_head(repo)
+    try:
+        ver, code = bump_patch(repo)
+        results = run_headless_tests(repo, out_dir, suite="l1")
+        man = l1_manifest.produce_manifest(d, repo, head, ver, code, results,
+                                           allow_dirty=False)
+        if not man["all_pass"]:
+            raise ReleaseError("l1 suite did not fully PASS; manifest not emitted")
+        Path(path).write_text(json.dumps(man, indent=2), encoding="utf-8")
+        log(f"  l1 manifest emitted -> {path} (head {head}, v{ver})")
+    finally:
+        # restore the bump so the working tree returns to clean HEAD
+        if idx_backup != "unset":
+            try:
+                restore_index(repo, idx_backup)
+            except Exception:
+                pass
+        cfg_path.write_bytes(cfg_backup)
 
 
 # --------------------------------------------------------------------------- #
@@ -1283,6 +1378,17 @@ def main():
     ap.add_argument("--catalog", action="store_true")
     ap.add_argument("--allow-dirty", action="store_true",
                     help="build with uncommitted changes (iteration only, never with --publish)")
+    ap.add_argument("--suite", choices=["default", "l1", "all"], default="default",
+                    help="headless gate scene suite (W1): default excludes "
+                         "test_levels_l1_*; l1 runs only those; all runs both")
+    ap.add_argument("--l1-manifest", default=None,
+                    help="reuse a previously produced l1 manifest for publish "
+                         "(strict binding: repo/HEAD/scene-set/PASS + "
+                         "producer-clean + post-bump source sha256)")
+    ap.add_argument("--emit-l1-manifest", default=None,
+                    help="write the l1 manifest produced by the inline l1 run "
+                         "(with --publish), or emit standalone (bump->l1->write"
+                         "->rollback) without --publish")
     ap.add_argument("--report-dir", default=None)
     args = ap.parse_args()
 
@@ -1300,6 +1406,8 @@ def main():
         ap.error("--publish requires a fresh version bump (no --skip-bump); "
                  "replacing an existing public release needs an explicit "
                  "force workflow, not a silent asset swap")
+    if args.l1_manifest and not args.publish:
+        ap.error("--l1-manifest is a publish-time reuse option (requires --publish)")
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     root = Path(args.report_dir) if args.report_dir else (
@@ -1308,6 +1416,21 @@ def main():
     out_root = root / f"release_verify_{stamp}"
     out_root.mkdir(parents=True, exist_ok=True)
     log(f"== release harness v3  device/reports -> {out_root}")
+
+    # Standalone l1 manifest emission (no device, no publish): bump -> l1 ->
+    # write -> rollback, so a later consumer publish from the same HEAD bumps
+    # to the same version and can strictly reuse the manifest.
+    if args.emit_l1_manifest and not args.publish:
+        rc_emit = 0
+        for repo in repos:
+            od = out_root / repo
+            od.mkdir(exist_ok=True)
+            try:
+                emit_l1_standalone(repo, od, args.emit_l1_manifest)
+            except Exception as e:
+                log(f"  emit FAIL {repo}: {type(e).__name__}: {e}")
+                rc_emit = 1
+        return rc_emit
 
     dev = Device()
     log(f"== device {dev.serial}")
@@ -1363,7 +1486,14 @@ def main():
                                        "version mismatch)")
             else:
                 if not args.skip_tests:
-                    rec["headless"] = run_headless_tests(repo, out_dir)
+                    rec["headless"] = run_headless_tests(repo, out_dir, suite=args.suite)
+                    rec["headless_suite"] = args.suite
+                    rec["headless_head"] = git_head(repo)
+                # W1: publish requires fresh l1 qualification evidence for any
+                # repo that has l1 scenes (002). Inline by default; optional
+                # strict --l1-manifest reuse. Runs on the post-bump tree.
+                if args.publish and not args.skip_tests:
+                    l1_publish_gate(repo, out_dir, ver, code, args, rec)
                 apk, size = build_apk(repo)
             rec.update(apk=str(apk), apk_size=size, head_built=git_head(repo))
 
@@ -1388,6 +1518,9 @@ def main():
                     raise ReleaseError("HEAD moved since the build -- refusing "
                                        "to publish an APK that does not match "
                                        "the tagged tree")
+                # W1: a repo with l1 scenes must carry l1 evidence to publish
+                # (l1 and mt evidence never substitute for each other; G-m9).
+                require_l1_evidence(repo, rec)
                 rec["publish"] = publish(dev, repo, tag, apk, size, out_dir,
                                          rec=rec, head_built=rec["head_built"])
             rec["ok"] = True
