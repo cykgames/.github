@@ -951,6 +951,14 @@ def release_notes(repo, tag, prev_tag, head=None):
 def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
             head_built=None):
     d = PROJECTS / repo
+    # review r16 (luna): the built-tree integrity guard must not be skippable
+    # at the function boundary. head_built=None (the old default) silently
+    # skipped the check; publishing without a known built HEAD is
+    # unverifiable -- refuse before ANY side effect.
+    if not head_built:
+        raise ReleaseError("publish requires head_built (built-tree integrity "
+                           "cannot be verified without the built HEAD) -- "
+                           "refusing publish")
     # NEVER silently replace an existing public release: the tag and the
     # release must both be new. Replacing an existing release requires an
     # explicit manual workflow (remove it first), not a harness side effect.
@@ -982,33 +990,36 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
     # commit the version bump so the tagged tree matches the built APK
     run(["git", "add", "export_presets.cfg"], cwd=d, check=True)
     rc, out = run(["git", "commit", "-m", f"chore(release): {tag}"], cwd=d)
-    if rc != 0 and "nothing to commit" not in out:
-        raise ReleaseError(f"version commit failed: {out[-400:]}")
+    # review r16 (sol I20 class): no tolerance strings on rc. bump_patch
+    # guarantees a cfg delta (read-back verified), so "nothing to commit"
+    # is not a legitimate outcome here; a hook could print it to mask a
+    # failed commit. rc!=0 is failure, full stop.
+    if rc != 0:
+        raise ReleaseError(f"version commit failed (rc={rc}): {out[-400:]}")
     if rec is not None:
         rec["version_committed"] = True   # past this point rollback must not
                                           # rewrite a committed file
-    if head_built:
-        # review r15 (sol I19): the diff rc was discarded -- a failed query
-        # (rc!=0 with empty output) passed as "no changes" (fail-open, same
-        # class as I17). A failed query is UNKNOWN, not "identical": refuse.
-        # stdout only (I18 pattern): a stderr warning is not a changed file.
-        rc, out, _err = run_split(["git", "diff", "--name-only", head_built,
-                                   "HEAD"], cwd=d)
-        if rc != 0:
-            raise ReleaseError(f"cannot verify built tree (git diff rc={rc}) "
-                               "-- refusing publish")
-        changed = [l.strip() for l in out.splitlines() if l.strip()]
-        # The bump commit must be the ONLY delta. An empty diff means the
-        # version bump never landed between built HEAD and tagged HEAD
-        # (unexpected state -- the APK metadata would not match the tag);
-        # empty output is never a pass.
-        if not changed:
-            raise ReleaseError("cannot verify built tree: empty diff between "
-                               "built HEAD and tagged HEAD (version bump "
-                               "commit missing) -- refusing publish")
-        if changed != ["export_presets.cfg"]:
-            raise ReleaseError("tagged tree differs from the built tree "
-                               f"beyond the version bump: {changed}")
+    # built-tree integrity (review r15 sol I19; r16 luna: head_built is
+    # mandatory, checked above). The diff rc must be checked -- a failed
+    # query (rc!=0 with empty output) is UNKNOWN, not "identical".
+    # stdout only (I18 pattern): a stderr warning is not a changed file.
+    rc, out, _err = run_split(["git", "diff", "--name-only", head_built,
+                               "HEAD"], cwd=d)
+    if rc != 0:
+        raise ReleaseError(f"cannot verify built tree (git diff rc={rc}) "
+                           "-- refusing publish")
+    changed = [l.strip() for l in out.splitlines() if l.strip()]
+    # The bump commit must be the ONLY delta. An empty diff means the
+    # version bump never landed between built HEAD and tagged HEAD
+    # (unexpected state -- the APK metadata would not match the tag);
+    # empty output is never a pass.
+    if not changed:
+        raise ReleaseError("cannot verify built tree: empty diff between "
+                           "built HEAD and tagged HEAD (version bump "
+                           "commit missing) -- refusing publish")
+    if changed != ["export_presets.cfg"]:
+        raise ReleaseError("tagged tree differs from the built tree "
+                           f"beyond the version bump: {changed}")
     # notes are written from the committed build state, not the parent
     run(["git", "fetch", "--tags", "--quiet"], cwd=d, timeout=300)
     if notes is None:
@@ -1022,8 +1033,13 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
         raise ReleaseError(f"git tag failed: {out[-400:]}")
     for ref in ("HEAD:main", tag):
         rc, out = run(["git", "push", "origin", ref], cwd=d, timeout=300)
-        if rc != 0 and "up-to-date" not in out and "Everything up-to-date" not in out:
-            raise ReleaseError(f"git push {ref} failed: {out[-500:]}")
+        # review r16 (sol I20): the "up-to-date" tolerance masked failed
+        # pushes (rc=1 with hook/partial output containing the string) and
+        # publish continued against an unchanged remote (reproduced with a
+        # real repo + bare origin + pre-push hook). A genuinely up-to-date
+        # push exits 0; rc!=0 is failure, full stop.
+        if rc != 0:
+            raise ReleaseError(f"git push {ref} failed (rc={rc}): {out[-500:]}")
     head = git_head(repo)
 
     status, rel = gh_api(f"/repos/{GH_ORG}/{repo}/releases/tags/{tag}")
@@ -1122,8 +1138,10 @@ def catalog_commit_push(changed):
     run(["git", "add", "profile/README.md"], cwd=d, check=True)
     msg = "catalog: release wave " + ", ".join(c.replace(":", " ") for c in changed)
     rc, out = run(["git", "commit", "-m", msg], cwd=d)
-    if rc != 0 and "nothing to commit" not in out:
-        raise ReleaseError(f"catalog commit failed: {out[-400:]}")
+    # review r16 (sol I20 class): changed rows guarantee a README delta, so
+    # "nothing to commit" is not legitimate here; no tolerance strings on rc.
+    if rc != 0:
+        raise ReleaseError(f"catalog commit failed (rc={rc}): {out[-400:]}")
     rc, out = run(["git", "push", "origin", "HEAD:main"], cwd=d, timeout=300)
     if rc != 0:
         raise ReleaseError(f"catalog push failed: {out[-400:]}")
