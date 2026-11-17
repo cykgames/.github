@@ -265,12 +265,53 @@ def classify_receipts(input_entries, trace):
     return atom_cand, emulation, cleanup
 
 
-def match_atoms(atoms, atom_candidates):
+def derive_coord_offset(atoms, atom_candidates):
+    """W2e forward display transform: measure the rigid display->receipt
+    translation from the run itself. Preliminary injective correspondence by
+    kind/stable_id/time-window (coords ignored); each uniquely-matched atom
+    yields offset=(atom_display - receipt). The transform must be a RIGID
+    translation: all per-atom offsets agree within COORD_TOL, else fail-closed
+    (a non-rigid/scale mismatch is a transform finding, not absorbed). Returns
+    (ox, oy, n, spread). Identity (0,0) when receipts already match display."""
+    receipts = sorted(atom_candidates, key=lambda e: (e["u"], e["s"]))
+    consumed = set()
+    offs = []
+    for a in sorted(atoms, key=lambda a: (a["edge_seq"], a["atom_seq"])):
+        if a.get("cleanup"):
+            continue
+        cands = [e for e in receipts
+                 if e["s"] not in consumed and e["k"] == a["kind"]
+                 and e["i"] == a["stable_id"]
+                 and a["t_before"] <= e["u"] <= a["t_after"] + CLEANUP_MARGIN_MS]
+        if len(cands) != 1:
+            continue
+        e = cands[0]
+        consumed.add(e["s"])
+        offs.append((a["x"] - e["x"], a["y"] - e["y"]))
+    if not offs:
+        raise CollectError("transform: no unique atom->receipt correspondence "
+                           "to derive the display offset")
+    ox = sum(o[0] for o in offs) / len(offs)
+    oy = sum(o[1] for o in offs) / len(offs)
+    spread = max(max(abs(o[0] - ox), abs(o[1] - oy)) for o in offs)
+    if spread > COORD_TOL:
+        raise CollectError(f"transform: non-rigid display offset (spread "
+                           f"{spread:.2f}px > {COORD_TOL}); offsets={offs[:4]}")
+    return ox, oy, len(offs), spread
+
+
+def match_atoms(atoms, atom_candidates, coord_offset=(0.0, 0.0)):
     """Injective order-preserving greedy match: atoms sorted (edge_seq,
     atom_seq), receipts sorted (up, seq); candidate = kind/stable_id/coords±2 +
     up in [t_before, t_after+50ms] + unconsumed. >1 candidate -> ambiguity
     reject; unmatched atom -> FAIL. Extra emulation/cleanup receipts are NOT
-    failures (handled by classify). Returns matched pairs + failures."""
+    failures (handled by classify). Returns matched pairs + failures.
+
+    coord_offset=(ox,oy) is the rigid display->receipt translation measured by
+    derive_coord_offset (W2e forward transform): atom display coords are
+    shifted by -offset into the receipt (Godot-screen) domain before the ±2px
+    compare. Default (0,0) preserves the identity-transform path (002)."""
+    ox, oy = coord_offset
     receipts = sorted(atom_candidates, key=lambda e: (e["u"], e["s"]))
     consumed = set()
     matched = []
@@ -278,13 +319,14 @@ def match_atoms(atoms, atom_candidates):
     for a in atoms:
         if a.get("cleanup"):
             continue
+        ax, ay = a["x"] - ox, a["y"] - oy
         cands = []
         for e in receipts:
             if e["s"] in consumed:
                 continue
             if e["k"] != a["kind"] or e["i"] != a["stable_id"]:
                 continue
-            if abs(e["x"] - a["x"]) > COORD_TOL or abs(e["y"] - a["y"]) > COORD_TOL:
+            if abs(e["x"] - ax) > COORD_TOL or abs(e["y"] - ay) > COORD_TOL:
                 continue
             if not (a["t_before"] <= e["u"] <= a["t_after"] + CLEANUP_MARGIN_MS):
                 continue

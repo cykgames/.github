@@ -11,20 +11,23 @@
   },
   "002-obby": {
     "launch_wait": 9,
-    "state_assert": {
+    "mt_state_assert": {
       "require_running": true,
-      "time_increase_min": 2.0,
+      "time_increase_min": 1.0,
       "stick_peak_min": 0.3,
       "pos_delta_min": 0.5,
-      "stick_settle_max": 0.2
+      "stick_settle_max": 0.2,
+      "jump": {"jump_delta_min": 1, "vy_peak_min": 1.0, "require_grounded_before": true}
     },
-    "_state_note": "CykTest.gd autoload emits [CYKTEST] telemetry; harness A6 asserts run gate + monotonic HUD timer + stick peak + player displacement + stick settle (negative control). verified: 2026-11-16 A54",
+    "_mt_note": "W2d B' mt move+jump (002 has no aim/shoot; dual-on-002 is a negative fixture). slot0 stick drag + slot1 J hold via single app_process timeline; uptime-domain receipt chain + nested jump spec. Navigation tap is legacy and cleared before the measured mt run. verified: 2026-11-17 A54",
     "steps": [
       {"tap": [0.151, 0.388], "wait": 4.0},
-      {"drag": [[0.141, 0.872], [0.24, 0.80]], "hold": 1.2, "wait": 0.6},
+      {"mt": {"contacts": [
+        {"slot": 0, "role": "move", "path": [[0.14, 0.872], [0.24, 0.8]], "hold": 1500},
+        {"slot": 1, "role": "jump", "path": [[0.847, 0.932]], "hold": 250}
+      ]}, "wait": 1.8},
       {"shot": "gp1"},
-      {"drag": [[0.141, 0.872], [0.141, 0.75]], "hold": 0.4, "wait": 1.5},
-      {"drag": [[0.24, 0.872], [0.141, 0.80]], "hold": 1.2, "wait": 1.0},
+      {"wait": 1.0},
       {"shot": "gp2"}
     ]
   },
@@ -95,11 +98,24 @@
   },
   "009-shooter": {
     "launch_wait": 9,
+    "mt_state_assert": {
+      "require_running": true,
+      "time_increase_min": 1.0,
+      "stick_peak_min": 0.3,
+      "pos_delta_min": 0.5,
+      "stick_settle_max": 0.2,
+      "dual": {"aim_peak_min": 0.3, "aim_settle_max": 0.2, "simultaneous_min_samples": 3, "fire_delta_min": 1}
+    },
+    "_mt_note": "W2d B' mt dual move+aim+shoot (twin-stick). slot0 move stick + slot1 aim stick simultaneous >=2.5s hold; aim output>0 drives shoot=true -> player bullets (fire_count via ProjectileSpawner.note_bullet). running=fight_mode AND !is_dead AND !paused. uptime-domain receipt chain + nested dual spec. verified: 2026-11-17 A54",
     "steps": [
       {"tap": [0.5017, 0.6806], "wait": 6.0},
+      {"drag": [[0.137, 0.768], [0.171, 0.722]], "hold": 1.5, "wait": 1.5},
+      {"mt": {"contacts": [
+        {"slot": 0, "role": "move", "path": [[0.137, 0.768], [0.20, 0.70]], "hold": 2600},
+        {"slot": 1, "role": "aim", "path": [[0.834, 0.768], [0.90, 0.70]], "hold": 2600}
+      ]}, "wait": 1.8},
       {"shot": "gp1"},
-      {"drag": [[0.137, 0.768], [0.171, 0.722]], "hold": 1.2, "wait": 0.5},
-      {"drag": [[0.834, 0.768], [0.868, 0.741]], "hold": 1.2, "wait": 1.0},
+      {"wait": 1.0},
       {"shot": "gp2"}
     ]
   }

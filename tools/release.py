@@ -68,6 +68,10 @@ from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import l1_manifest  # noqa: E402  (W1 l1 qualification-suite manifest contract)
+import mt_inject  # noqa: E402  (W2d B' host multi-touch injector driver)
+import mt_collect  # noqa: E402  (W2c dual-marker collector + receipt-chain matcher)
+import mt_assert  # noqa: E402  (W2d uptime-domain mt state assertions)
+import mt_spec  # noqa: E402  (W2d nested dual/jump spec blocks)
 
 HOME = Path.home()
 PROJECTS = HOME / "projects"
@@ -76,6 +80,9 @@ GODOT = HOME / "tools" / "godot-4.7.2" / "Godot_v4.7.2-stable_win64_console.exe"
 ADB = Path(r"C:\Android\platform-tools\adb.exe")
 AAPT2 = Path(r"C:\Android\build-tools\36.0.0\aapt2.exe")
 GH_ORG = "cykgames"
+# W2d B' canonical injector jar (built by tools/mtinject/build_jar.py; the
+# build product is gitignored, the source + sha256 are tracked).
+MT_JAR = Path(__file__).with_name("mtinject") / "mtinject.jar"
 
 # gameplay liveness thresholds
 GAMEPLAY_DIFF_MIN = 0.004     # two frames 3.5s apart inside gameplay (world motion)
@@ -486,10 +493,62 @@ def target_pids(dev, pkg):
     return [int(t) for t in out.split() if t.isdigit()]
 
 
-def do_step(dev, step, w, h, shots, out_dir, label, timeline=None):
+def mt_windows_from_trace(trace, roles):
+    """Per-contact active windows in the uptime domain (plan v4.17 W2d):
+    [DOWN t_after, UP t_before] per stable id (delivery endpoints absorbed,
+    never double-counted). roles: {stable_id: role}. Returns [{id, role, t0,
+    t1}] sorted by t0. A contact missing a DOWN or UP endpoint is a corrupt
+    trace -> InjectError (fail-closed, never a silent zero-width window)."""
+    down, up = {}, {}
+    for ev in trace:
+        if ev.get("phase") != "business":
+            continue
+        action = ev["action"]
+        ids = ev["ids"]
+        if action == "down":
+            down[ids[0]] = ev["t_after"]
+        elif action == "pointer_down":
+            down[ids[ev["index"]]] = ev["t_after"]
+        elif action == "up":
+            up[ids[0]] = ev["t_before"]
+        elif action == "pointer_up":
+            up[ids[ev["index"]]] = ev["t_before"]
+    wins = []
+    for sid, role in roles.items():
+        if sid not in down or sid not in up:
+            raise mt_inject.InjectError(
+                f"contact {sid} ({role}) missing DOWN/UP endpoint in trace")
+        if up[sid] < down[sid]:
+            raise mt_inject.InjectError(
+                f"contact {sid} UP t_before < DOWN t_after (corrupt trace)")
+        wins.append(dict(id=sid, role=role, t0=down[sid], t1=up[sid]))
+    wins.sort(key=lambda w: (w["t0"], w["id"]))
+    return wins
+
+
+def do_step(dev, step, w, h, shots, out_dir, label, timeline=None, mt_inj=None):
     if "tap" in step:
         fx, fy = step["tap"]
         dev.adb("shell", "input", "tap", str(int(fx * w)), str(int(fy * h)))
+    elif "mt" in step:
+        # W2d B' multi-touch injection: a single device-side app_process run
+        # (no per-event adb RTT). Records per-contact uptime windows (with
+        # role) + the injector result for the receipt-chain matcher.
+        if mt_inj is None:
+            raise ReleaseError("mt step requires an mt injector context")
+        recipe = step["mt"]
+        run_id = "smoke-%s-%d" % (label, int(time.time() * 1000))
+        res = mt_inj.run(recipe, run_id=run_id)
+        res["recipe_contacts"] = recipe["contacts"]
+        if timeline is not None:
+            timeline.setdefault("mt_runs", []).append(res)
+            if res.get("ok"):
+                roles = mt_inject.roles_by_id(recipe)
+                wins = mt_windows_from_trace(res["mtresult"]["trace"], roles)
+                timeline.setdefault("mt_windows", []).extend(wins)
+        if not res.get("ok"):
+            raise ReleaseError(f"mt injection failed: {res.get('error')} "
+                               f"(release_error={res.get('release_error')})")
     elif "drag" in step:
         t0 = time.time()
         (x0, y0), (x1, y1) = step["drag"]
@@ -797,6 +856,151 @@ def device_clock_sample(dev):
     return dict(dev=d, host=(h0 + h1) / 2.0, rtt=h1 - h0)
 
 
+def mt_evaluate(dev, repo, recipe, timeline, out_dir, pids):
+    """W2d mt touch verification (uptime domain, plan v4.17 W2c/W2d). Parses
+    the dual-marker logcat, binds the session to the run producer PID, checks
+    ring watermarks/capacity, matches the atom->arrival->route->applied chain
+    injectively per role, and runs the nested-spec mt state assertions.
+    Fail-CLOSED: a declared mt/ring channel with zero ring markers or zero
+    samples is ring_channel_missing (never a pixel fallback); any unmatched
+    atom / broken link / failed state check raises. Returns an evidence dict
+    with touch_pass=True only when every gate passes."""
+    spec = recipe["mt_state_assert"]
+    try:
+        base, dual, jump = mt_spec.parse_spec(spec)
+    except mt_spec.SpecError as e:
+        raise ReleaseError(f"A6-mt: spec invalid: {e}")
+    declared = mt_spec.declared_roles(dual, jump)
+
+    runs = timeline.get("mt_runs", [])
+    windows = timeline.get("mt_windows", [])
+    if not runs:
+        raise ReleaseError("A6-mt: recipe declares mt_state_assert but no mt "
+                           "injection step ran")
+    # every contact role must be asserted by the spec (no ignored role)
+    contact_roles = set(w["role"] for w in windows)
+    ignored = contact_roles - declared
+    if ignored:
+        raise ReleaseError(f"A6-mt: contact roles {sorted(ignored)} not "
+                           "consumed by any spec block (ignored role)")
+
+    logtext = dev.adb("logcat", "-d", "-v", "threadtime", timeout=120)
+    (out_dir / f"{repo}_mt_logcat.log").write_text(logtext, encoding="utf-8")
+    parsed = mt_collect.parse_logcat(logtext)
+    samples = parsed["samples"]
+    ring_lines = parsed["ring_lines"]
+    # ring_channel_missing fail-closed (N13): declared but absent channel
+    if not ring_lines:
+        raise ReleaseError("A6-mt: ring_channel_missing -- mt/ring declared "
+                           "but zero [CYKTEST-RING] markers")
+    if not samples:
+        raise ReleaseError("A6-mt: ring_channel_missing -- zero [CYKTEST] "
+                           "state samples")
+    try:
+        merged, sids = mt_collect.merge_rings(ring_lines)
+        run_pid = pids[0] if pids else None
+        sid = mt_collect.bind_session(samples, sids, run_pid)
+        play = [s for s in samples if s.get("scene") == "play"]
+        # capacity budget from the injection envelope (rate bounds: input
+        # 120/s, route/apply 60/s, jump 5/s) + emulation/navigation margin.
+        if windows:
+            env_s = (max(w["t1"] for w in windows)
+                     - min(w["t0"] for w in windows)) / 1000.0
+        else:
+            env_s = 0.0
+        budget = {"input": int(120 * env_s) + 96,
+                  "route": int(60 * env_s) + 48,
+                  "apply": int(60 * env_s) + 48,
+                  "jump": int(5 * env_s) + 16}
+        delta = mt_collect.check_watermarks(play, budget)
+    except mt_collect.CollectError as e:
+        raise ReleaseError(f"A6-mt: collector refused: {e}")
+
+    # receipt-chain match per mt run (injective, order-preserving, per-role)
+    input_entries = sorted(merged.get("input_log", {}).values(), key=lambda e: e["s"])
+    route_entries = sorted(merged.get("route_log", {}).values(), key=lambda e: e["s"])
+    apply_entries = sorted(merged.get("apply_log", {}).values(), key=lambda e: e["s"])
+    jump_entries = sorted(merged.get("jump_log", {}).values(), key=lambda e: e["s"])
+    input_by_seq = {e["s"]: e for e in input_entries}
+    chain = []
+    atom_fails, link_fails = [], []
+    n_atoms = n_matched = n_links = 0
+    latency = {"move": [], "aim": [], "shoot": [], "jump": []}
+    for res in runs:
+        mt = res.get("mtresult") or {}
+        trace = mt.get("trace") or []
+        roles = {c["slot"]: c["role"] for c in
+                 (res.get("recipe_contacts") or [])}
+        if not roles:
+            # recover roles from the windows recorded for this run's trace
+            roles = {w["id"]: w["role"] for w in windows}
+        atoms = mt_collect.expand_atoms(trace)
+        cand, emu, clean = mt_collect.classify_receipts(input_entries, trace)
+        # W2e forward display transform: derive the rigid display->receipt
+        # offset from this run (identity for portrait/no-stretch games like
+        # 002; the surface-inset translation for landscape/stretch games like
+        # 009). Non-rigid -> CollectError -> fail-closed.
+        try:
+            ox, oy, n_off, spread = mt_collect.derive_coord_offset(atoms, cand)
+        except mt_collect.CollectError as e:
+            raise ReleaseError(f"A6-mt: {e}")
+        matched, mfails = mt_collect.match_atoms(atoms, cand, coord_offset=(ox, oy))
+        atom_fails.extend(mfails)
+        biz = [a for a in atoms if not a.get("cleanup")]
+        n_atoms += len(biz)
+        n_matched += len(matched)
+        links, lfails = mt_collect.match_route_applied(
+            matched, route_entries, apply_entries, jump_entries, roles, input_by_seq)
+        link_fails.extend(lfails)
+        n_links += len(links)
+        for l in links:
+            role = l["role"]
+            ap = l.get("applied")
+            if ap is not None and role in latency:
+                latency[role].append(ap["u"] - l["arrival"]["u"])
+        chain.append(dict(run_id=res.get("run_id"), atoms=len(biz),
+                          matched=len(matched), links=len(links),
+                          emulation=len(emu), cleanup=len(clean),
+                          atom_fails=len(mfails), link_fails=len(lfails),
+                          coord_offset=[round(ox, 2), round(oy, 2)],
+                          offset_samples=n_off, offset_spread=round(spread, 3)))
+    if atom_fails:
+        raise ReleaseError(f"A6-mt: {len(atom_fails)} unmatched/ambiguous atom "
+                           f"receipt(s): {atom_fails[:3]}")
+    if n_matched != n_atoms:
+        raise ReleaseError(f"A6-mt: atom coverage {n_matched}/{n_atoms} "
+                           "(injective match incomplete)")
+    if link_fails:
+        raise ReleaseError(f"A6-mt: {len(link_fails)} broken route/applied "
+                           f"link(s): {link_fails[:3]}")
+
+    # mt state assertions (uptime domain; nested dual/jump blocks)
+    try:
+        checks = mt_assert.mt_state_checks(samples, windows, base, dual, jump)
+    except mt_assert.AssertError as e:
+        raise ReleaseError(f"A6-mt: corrupt series: {e}")
+    if not checks:
+        raise ReleaseError("A6-mt: zero state checks -- refusing vacuous pass")
+    bad = [c for c in checks if not c["ok"]]
+    xform = next((s.get("xform") for s in play if s.get("xform")), None)
+    evidence = dict(touch_pass=not bad, session=sid, run_pid=run_pid,
+                    play_samples=len(play), ring_lines=len(ring_lines),
+                    overflow_delta=delta, capacity_budget=budget,
+                    atoms=n_atoms, matched=n_matched, links=n_links,
+                    chain=chain, state_checks=checks,
+                    applied_latency_ms={k: (max(v) if v else None)
+                                        for k, v in latency.items()},
+                    screen_xform=xform,
+                    declared_roles=sorted(declared),
+                    contact_roles=sorted(contact_roles))
+    if bad:
+        raise ReleaseError("A6-mt touch state failed: " + "; ".join(
+            f"{c['name']} ({c['detail']})" for c in bad))
+    log(f"  A6-mt touch PASS (session {sid[:16]}…, {n_matched}/{n_atoms} atoms, "
+        f"{n_links} links, {len(checks)} checks, overflow_delta={delta})")
+    return evidence
+
+
 def smoke(dev, repo, recipe, out_dir):
     """Run the recipe and enforce A1..A4 (+A6 when [CYKTEST] is present).
     Returns an evidence dict; touch_pass is True ONLY with state assertions."""
@@ -831,9 +1035,27 @@ def smoke(dev, repo, recipe, out_dir):
 
     shots = {}
     timeline = {}
+    # W2d: an mt recipe declares mt_state_assert (nested dual/jump spec) and
+    # carries {"mt": {contacts}} injection steps. The legacy epoch path is
+    # unchanged for non-mt recipes (mixed mt+legacy overlap is refused by the
+    # collector; an mt recipe uses legacy taps ONLY for navigation, cleared
+    # before the measured mt run so navigation receipts never pollute it).
+    is_mt = "mt_state_assert" in recipe
+    mt_inj = None
+    if is_mt:
+        if not MT_JAR.exists():
+            raise ReleaseError(f"A6-mt: canonical injector jar missing: {MT_JAR} "
+                               "(run tools/mtinject/build_jar.py)")
+        mt_inj = mt_inject.MtInjector(dev, MT_JAR, w, h)
+    mt_measurement_started = False
     c0 = device_clock_sample(dev)
     for i, step in enumerate(recipe["steps"]):
-        do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}", timeline)
+        if is_mt and "mt" in step and not mt_measurement_started:
+            # isolate the measured run: drop navigation receipts/samples
+            dev.adb("logcat", "-c")
+            mt_measurement_started = True
+        do_step(dev, step, w, h, shots, out_dir, f"{repo}_{i:02d}", timeline,
+                mt_inj=mt_inj)
     c1 = device_clock_sample(dev)
     evidence["input_timeline"] = timeline
     for key in ("gp1", "gp2"):
@@ -854,70 +1076,76 @@ def smoke(dev, repo, recipe, out_dir):
     # declared-but-missing channel all raise -- none of them may silently fall
     # back to pixel-only. Declaration is keyed on PRESENCE, not truthiness
     # ({} and null are declarations and must be rejected).
-    samples, tstats = collect_cyktest(dev)
-    declared = "state_assert" in recipe
-    spec = recipe.get("state_assert")
-    evidence["cyktest_samples"] = len(samples)
-    evidence["cyktest_stats"] = tstats
-    if tstats["malformed"]:
-        raise ReleaseError(f"A6: {tstats['malformed']} malformed [CYKTEST] "
-                           "line(s) -- corrupt telemetry, refusing pixel fallback")
-    if declared:
-        if not isinstance(spec, dict):
-            raise ReleaseError("A6: state_assert must be a JSON object")
-        unknown = set(spec) - ALLOWED_SPEC_KEYS
-        if unknown:
-            raise ReleaseError(f"A6: unknown state_assert keys {sorted(unknown)}")
-        missing = REQUIRED_SPEC_KEYS - set(spec)
-        if missing:
-            raise ReleaseError(f"A6: state_assert below minimum strength, "
-                               f"missing keys {sorted(missing)}")
-        validate_spec_values(spec)
-    if samples:
-        if not declared:
-            raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
-                               "has no state_assert spec")
-        # Align the host injection timeline with device telemetry timestamps.
-        # Bracketed clock reads: offset uses the host midpoint (cancels
-        # symmetric ADB latency); rtt/2 bounds the uncertainty used for the
-        # drag-window interior and the timestamp sanity ceiling.
-        if c0 is None or c1 is None:
-            raise ReleaseError("A6: device clock unreadable -- cannot align "
-                               "drag timeline / verify telemetry freshness")
-        c2 = device_clock_sample(dev)      # clock at telemetry collection
-        if c2 is None:
-            raise ReleaseError("A6: device clock unreadable at collection")
-        if max(c0["rtt"], c1["rtt"], c2["rtt"]) > 4.0:
-            raise ReleaseError("A6: device clock query too slow (>4s RTT) -- "
-                               "alignment untrustworthy")
-        offset = ((c0["dev"] - c0["host"]) + (c1["dev"] - c1["host"])) / 2.0
-        unc = max(c0["rtt"], c1["rtt"], c2["rtt"]) / 2.0 + 0.05
-        drags_dev = [[a + offset, b + offset]
-                     for a, b in timeline.get("drags", [])]
-        ts_max = c2["dev"] + c2["rtt"] / 2.0 + 0.5
-        evidence["clock_offset"] = round(offset, 3)
-        evidence["clock_uncertainty"] = round(unc, 3)
-        checks = state_checks(samples, spec, drags_dev, c1["dev"], unc, ts_max)
-        if not checks:
-            raise ReleaseError("A6: state_assert produced zero checks -- "
-                               "refusing vacuous touch_pass")
-        evidence["state_checks"] = checks
-        bad = [c for c in checks if not c["ok"]]
-        if bad:
-            raise ReleaseError("A6 touch state failed: " + "; ".join(
-                f"{c['name']} ({c['detail']})" for c in bad))
-        evidence["touch_pass"] = True
-        log(f"  A6 touch state PASS ({len(samples)} samples, "
-            f"{len(checks)} checks)")
+    if is_mt:
+        # W2d mt path: uptime-domain receipt chain + nested-spec assertions.
+        # mt_evaluate raises on any gate failure (fail-closed, no pixel fallback).
+        evidence["mt"] = mt_evaluate(dev, repo, recipe, timeline, out_dir, pids)
+        evidence["touch_pass"] = evidence["mt"]["touch_pass"]
     else:
+        samples, tstats = collect_cyktest(dev)
+        declared = "state_assert" in recipe
+        spec = recipe.get("state_assert")
+        evidence["cyktest_samples"] = len(samples)
+        evidence["cyktest_stats"] = tstats
+        if tstats["malformed"]:
+            raise ReleaseError(f"A6: {tstats['malformed']} malformed [CYKTEST] "
+                               "line(s) -- corrupt telemetry, refusing pixel fallback")
         if declared:
-            raise ReleaseError(f"A6: {repo} recipe declares state_assert but "
-                               "no [CYKTEST] telemetry found -- channel broken")
-        evidence["touch_pass"] = False
-        evidence["touch_warning"] = ("no [CYKTEST] telemetry: pixel liveness "
-                                     "only, NOT a touch proof")
-        log("  WARNING: no [CYKTEST] channel -- touch_pass=false "
-            "(pixel liveness only)")
+            if not isinstance(spec, dict):
+                raise ReleaseError("A6: state_assert must be a JSON object")
+            unknown = set(spec) - ALLOWED_SPEC_KEYS
+            if unknown:
+                raise ReleaseError(f"A6: unknown state_assert keys {sorted(unknown)}")
+            missing = REQUIRED_SPEC_KEYS - set(spec)
+            if missing:
+                raise ReleaseError(f"A6: state_assert below minimum strength, "
+                                   f"missing keys {sorted(missing)}")
+            validate_spec_values(spec)
+        if samples:
+            if not declared:
+                raise ReleaseError(f"A6: {repo} emits [CYKTEST] but the recipe "
+                                   "has no state_assert spec")
+            # Align the host injection timeline with device telemetry timestamps.
+            # Bracketed clock reads: offset uses the host midpoint (cancels
+            # symmetric ADB latency); rtt/2 bounds the uncertainty used for the
+            # drag-window interior and the timestamp sanity ceiling.
+            if c0 is None or c1 is None:
+                raise ReleaseError("A6: device clock unreadable -- cannot align "
+                                   "drag timeline / verify telemetry freshness")
+            c2 = device_clock_sample(dev)      # clock at telemetry collection
+            if c2 is None:
+                raise ReleaseError("A6: device clock unreadable at collection")
+            if max(c0["rtt"], c1["rtt"], c2["rtt"]) > 4.0:
+                raise ReleaseError("A6: device clock query too slow (>4s RTT) -- "
+                                   "alignment untrustworthy")
+            offset = ((c0["dev"] - c0["host"]) + (c1["dev"] - c1["host"])) / 2.0
+            unc = max(c0["rtt"], c1["rtt"], c2["rtt"]) / 2.0 + 0.05
+            drags_dev = [[a + offset, b + offset]
+                         for a, b in timeline.get("drags", [])]
+            ts_max = c2["dev"] + c2["rtt"] / 2.0 + 0.5
+            evidence["clock_offset"] = round(offset, 3)
+            evidence["clock_uncertainty"] = round(unc, 3)
+            checks = state_checks(samples, spec, drags_dev, c1["dev"], unc, ts_max)
+            if not checks:
+                raise ReleaseError("A6: state_assert produced zero checks -- "
+                                   "refusing vacuous touch_pass")
+            evidence["state_checks"] = checks
+            bad = [c for c in checks if not c["ok"]]
+            if bad:
+                raise ReleaseError("A6 touch state failed: " + "; ".join(
+                    f"{c['name']} ({c['detail']})" for c in bad))
+            evidence["touch_pass"] = True
+            log(f"  A6 touch state PASS ({len(samples)} samples, "
+                f"{len(checks)} checks)")
+        else:
+            if declared:
+                raise ReleaseError(f"A6: {repo} recipe declares state_assert but "
+                                   "no [CYKTEST] telemetry found -- channel broken")
+            evidence["touch_pass"] = False
+            evidence["touch_warning"] = ("no [CYKTEST] telemetry: pixel liveness "
+                                         "only, NOT a touch proof")
+            log("  WARNING: no [CYKTEST] channel -- touch_pass=false "
+                "(pixel liveness only)")
 
     # A3 gameplay reached + live. Pixel evidence is a LIVENESS gate, never a
     # touch pass. With a passing A6 state series, pixel problems demote to

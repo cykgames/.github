@@ -260,5 +260,63 @@ class Chain(unittest.TestCase):
         self.assertTrue(c.check_mixed_overlap({"move": "device_uptime", "aim": "device_uptime"}, ["move", "aim"]))
 
 
+class Transform(unittest.TestCase):
+    """W2e forward display transform: rigid display->receipt offset derived
+    from the run (landscape/stretch surface inset), verified rigid. Uses a
+    FRESH receipt base (other tests mutate the shared INPUT global in place)."""
+    BASE = [
+        inp(1, "touch_down", 0, 0, 100, 200, 1004),
+        inp(2, "mouse_down", 0, -1, 100, 200, 1003),
+        inp(3, "touch_down", 1, 0, 900, 2100, 1014),
+        inp(4, "drag", 0, 0, 150, 200, 1044),
+        inp(5, "drag", 1, 0, 900, 2100, 1044),
+        inp(6, "touch_up", 1, 0, 900, 2100, 1084),
+        inp(7, "touch_up", 0, 0, 150, 200, 1094),
+        inp(8, "mouse_up", 0, -1, 150, 200, 1095),
+    ]
+
+    def _shifted(self, ox, oy):
+        # receipts live in the Godot-screen domain = atom_display - offset
+        return [dict(e, x=e["x"] - ox, y=e["y"] - oy) for e in self.BASE]
+
+    def test_derive_identity(self):
+        atoms = c.expand_atoms(TRACE)
+        cand, _, _ = c.classify_receipts([dict(e) for e in self.BASE], TRACE)
+        ox, oy, n, spread = c.derive_coord_offset(atoms, cand)
+        self.assertAlmostEqual(ox, 0.0, places=3)
+        self.assertAlmostEqual(oy, 0.0, places=3)
+        self.assertGreaterEqual(n, 3)
+        self.assertLessEqual(spread, c.COORD_TOL)
+
+    def test_derive_rigid_translation(self):
+        atoms = c.expand_atoms(TRACE)
+        cand, _, _ = c.classify_receipts(self._shifted(80, 84), TRACE)
+        ox, oy, n, spread = c.derive_coord_offset(atoms, cand)
+        self.assertAlmostEqual(ox, 80.0, places=3)
+        self.assertAlmostEqual(oy, 84.0, places=3)
+        self.assertLessEqual(spread, c.COORD_TOL)
+
+    def test_derive_non_rigid_rejected(self):
+        atoms = c.expand_atoms(TRACE)
+        shifted = self._shifted(80, 84)
+        shifted[0]["x"] -= 50   # one receipt off -> non-rigid
+        cand, _, _ = c.classify_receipts(shifted, TRACE)
+        with self.assertRaises(c.CollectError):
+            c.derive_coord_offset(atoms, cand)
+
+    def test_match_with_offset(self):
+        atoms = c.expand_atoms(TRACE)
+        cand, _, _ = c.classify_receipts(self._shifted(80, 84), TRACE)
+        matched, fails = c.match_atoms(atoms, cand, coord_offset=(80, 84))
+        self.assertEqual(fails, [])
+        self.assertEqual(len(matched), 5)
+
+    def test_match_offset_missing_fails(self):
+        atoms = c.expand_atoms(TRACE)
+        cand, _, _ = c.classify_receipts(self._shifted(80, 84), TRACE)
+        matched, fails = c.match_atoms(atoms, cand)   # default identity
+        self.assertTrue(any(f["reason"] == "no_receipt" for f in fails))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
