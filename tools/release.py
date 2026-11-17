@@ -988,9 +988,25 @@ def publish(dev, repo, tag, apk, size, out_dir, notes=None, rec=None,
         rec["version_committed"] = True   # past this point rollback must not
                                           # rewrite a committed file
     if head_built:
-        _, out = run(["git", "diff", "--name-only", head_built, "HEAD"], cwd=d)
+        # review r15 (sol I19): the diff rc was discarded -- a failed query
+        # (rc!=0 with empty output) passed as "no changes" (fail-open, same
+        # class as I17). A failed query is UNKNOWN, not "identical": refuse.
+        # stdout only (I18 pattern): a stderr warning is not a changed file.
+        rc, out, _err = run_split(["git", "diff", "--name-only", head_built,
+                                   "HEAD"], cwd=d)
+        if rc != 0:
+            raise ReleaseError(f"cannot verify built tree (git diff rc={rc}) "
+                               "-- refusing publish")
         changed = [l.strip() for l in out.splitlines() if l.strip()]
-        if changed and changed != ["export_presets.cfg"]:
+        # The bump commit must be the ONLY delta. An empty diff means the
+        # version bump never landed between built HEAD and tagged HEAD
+        # (unexpected state -- the APK metadata would not match the tag);
+        # empty output is never a pass.
+        if not changed:
+            raise ReleaseError("cannot verify built tree: empty diff between "
+                               "built HEAD and tagged HEAD (version bump "
+                               "commit missing) -- refusing publish")
+        if changed != ["export_presets.cfg"]:
             raise ReleaseError("tagged tree differs from the built tree "
                                f"beyond the version bump: {changed}")
     # notes are written from the committed build state, not the parent
