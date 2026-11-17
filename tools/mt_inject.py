@@ -72,8 +72,10 @@ def validate_recipe(recipe):
 def compile_timeline(recipe, display_w, display_h, run_id):
     """Compile contacts -> synchronized timeline frames. First contact DOWN,
     others POINTER_DOWN (append index); synchronized MOVE through path points
-    at <=30Hz; hold; reverse POINTER_UP then UP. stable id == slot. Coordinates
-    converted fraction -> display px. edge_seq/atom_seq annotated."""
+    at <=30Hz; per-contact hold -> staggered POINTER_UP/UP groups (equal holds
+    reproduce the legacy reverse-order layout byte-for-byte). stable id ==
+    slot. Coordinates converted fraction -> display px. edge_seq/atom_seq
+    annotated."""
     validate_recipe(recipe)
     contacts = sorted(recipe["contacts"], key=lambda c: c["slot"])
     n = len(contacts)
@@ -104,22 +106,40 @@ def compile_timeline(recipe, display_w, display_h, run_id):
         frames.append(dict(delay_ms=PERIOD_MS, action="move", index=0,
                            pointers=ptrs(pos_at(k)), edge_seq=edge, atom_seq=0))
         edge += 1
-    # HOLD: applied as a delay on the first UP-phase frame (NOT a redundant
-    # same-position MOVE, which Godot drag-accumulate would coalesce -> missing
-    # atom receipt, G-m7). The stick output persists during the hold.
-    hold = int(max(c["hold"] for c in contacts))
-    # UP phase (reverse pointer_up, then up). pointer_up at index i carries the
-    # array BEFORE removal = contacts 0..i (higher contacts already lifted).
-    first_up = True
-    for i in range(n - 1, 0, -1):
-        partial = [{"id": ids[j], "x": paths[j][-1][0], "y": paths[j][-1][1]} for j in range(i + 1)]
-        frames.append(dict(delay_ms=hold if first_up else 0, action="pointer_up", index=i,
-                           pointers=partial, edge_seq=edge, atom_seq=0))
-        first_up = False
-        edge += 1
-    frames.append(dict(delay_ms=hold if first_up else 0, action="up", index=0,
-                       pointers=[{"id": ids[0], "x": paths[0][-1][0], "y": paths[0][-1][1]}],
-                       edge_seq=edge, atom_seq=0))
+    # HOLD + UP phase: per-contact hold (plan schema {slot,role,path,hold}).
+    # Each contact lifts hold_i ms after the MOVE phase ends; contacts sharing
+    # a hold lift together in reverse slot order. The hold is an UP-phase
+    # delay, NOT a redundant same-position MOVE (Godot drag-accumulate would
+    # coalesce it -> missing atom receipt, G-m7). A contact lifting while
+    # others stay down uses POINTER_UP at its current array index (legal for
+    # index 0 too; the jar validator + Android allow non-primary lifts); the
+    # last remaining contact uses UP. Equal holds reproduce the legacy frame
+    # layout byte-for-byte (single group, reverse order, final UP).
+    active = list(ids)
+    path_idx = {c["slot"]: i for i, c in enumerate(contacts)}
+    groups = {}
+    for c in contacts:
+        groups.setdefault(int(c["hold"]), []).append(c["slot"])
+    prev_hold = 0
+    for g_hold in sorted(groups):
+        first_in_group = True
+        for sid in sorted(groups[g_hold], reverse=True):
+            idx = active.index(sid)
+            if len(active) == 1:
+                action, aidx = "up", 0
+                partial = [{"id": sid, "x": paths[path_idx[sid]][-1][0],
+                            "y": paths[path_idx[sid]][-1][1]}]
+            else:
+                action, aidx = "pointer_up", idx
+                partial = [{"id": active[j], "x": paths[path_idx[active[j]]][-1][0],
+                            "y": paths[path_idx[active[j]]][-1][1]} for j in range(len(active))]
+            delay = (g_hold - prev_hold) if first_in_group else 0
+            frames.append(dict(delay_ms=delay, action=action, index=aidx,
+                               pointers=partial, edge_seq=edge, atom_seq=0))
+            first_in_group = False
+            edge += 1
+            active.pop(idx)
+        prev_hold = g_hold
     prog = dict(run_id=run_id,
                 contacts=[{"slot": c["slot"], "role": c["role"]} for c in contacts],
                 frames=frames)

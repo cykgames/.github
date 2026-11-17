@@ -106,10 +106,24 @@
       "stick_settle_max": 0.2,
       "dual": {"aim_peak_min": 0.3, "aim_settle_max": 0.2, "simultaneous_min_samples": 3, "fire_delta_min": 1}
     },
-    "_mt_note": "W2d B' mt dual move+aim+shoot (twin-stick). slot0 move stick + slot1 aim stick simultaneous >=2.5s hold; aim output>0 drives shoot=true -> player bullets (fire_count via ProjectileSpawner.note_bullet). running=fight_mode AND !is_dead AND !paused. uptime-domain receipt chain + nested dual spec. verified: 2026-11-17 A54",
+    "_mt_note": "W2d B' mt dual move+aim+shoot (twin-stick). slot0 move stick + slot1 aim stick simultaneous >=2.5s hold; aim output>0 drives shoot=true -> player bullets (fire_count via ProjectileSpawner.note_bullet). running=fight_mode AND !is_dead AND !paused. fight_mode requires crossing an ArenaEntry strip (ArenaStarter.body_entered). The room_start Stairs door is DISABLED (collision_mask=0, invisible) until all 3 starting-weapon pickups are collected (StartingWeaponSpawner._disable_exits/_finish_pickups; markers 157,118 / 181,131 / 203,141, pickup radius 14). The nav step closed-loops on [CYKTEST] pos/running with real mt move runs: spawn (120,121) -> 3 pickups -> Stairs door (207,119, jump_only waits for the transition) -> room_0 south entry Stairs4 (650,286) -> ArenaEntry CP3 strip toward (600,265). stick_home=(66,202) design (MoveStick offset_top 120 + home 66,82); axis_mult=(1,0.5); player max_speed 60. Nav runs are legacy-equivalent (cleared before the measured mt run). verified: 2026-11-17 A54",
     "steps": [
       {"tap": [0.5017, 0.6806], "wait": 6.0},
-      {"drag": [[0.137, 0.768], [0.171, 0.722]], "hold": 1.5, "wait": 1.5},
+      {"nav": {
+        "stick_home": [66, 202],
+        "axis_mult": [1.0, 0.5],
+        "knob_throw": 35.0,
+        "hold_ms": 700,
+        "budget_s": 180,
+        "legs": [
+          {"to": [157, 118], "tol": 6, "settle_expect": [120, 121], "settle_tol": 25},
+          {"to": [181, 131], "tol": 6},
+          {"to": [203, 141], "tol": 6},
+          {"to": [207, 119], "tol": 8, "jump_advance": true, "jump_only": true},
+          {"to": [600, 265], "tol": 10, "running_goal": true,
+           "settle_expect": [650, 286], "settle_tol": 45}
+        ]
+      }, "wait": 0.5},
       {"mt": {"contacts": [
         {"slot": 0, "role": "move", "path": [[0.137, 0.768], [0.20, 0.70]], "hold": 2600},
         {"slot": 1, "role": "aim", "path": [[0.834, 0.768], [0.90, 0.70]], "hold": 2600}

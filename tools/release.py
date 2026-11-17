@@ -72,6 +72,7 @@ import mt_inject  # noqa: E402  (W2d B' host multi-touch injector driver)
 import mt_collect  # noqa: E402  (W2c dual-marker collector + receipt-chain matcher)
 import mt_assert  # noqa: E402  (W2d uptime-domain mt state assertions)
 import mt_spec  # noqa: E402  (W2d nested dual/jump spec blocks)
+import mt_nav  # noqa: E402  (W2d closed-loop fight-mode navigation, real mt events)
 
 HOME = Path.home()
 PROJECTS = HOME / "projects"
@@ -549,6 +550,21 @@ def do_step(dev, step, w, h, shots, out_dir, label, timeline=None, mt_inj=None):
         if not res.get("ok"):
             raise ReleaseError(f"mt injection failed: {res.get('error')} "
                                f"(release_error={res.get('release_error')})")
+    elif "nav" in step:
+        # W2d closed-loop fight-mode navigation (009): steers with REAL B' mt
+        # move runs closed on [CYKTEST] pos/running telemetry. Navigation runs
+        # are legacy-equivalent -- deliberately NOT recorded into mt_runs /
+        # mt_windows; the measured mt run's logcat -c (below) drops their
+        # receipts. Fail-closed: any NavError aborts the smoke.
+        if mt_inj is None:
+            raise ReleaseError("nav step requires an mt injector context")
+        try:
+            ev = mt_nav.navigate(dev, mt_inj, step["nav"], w, h,
+                                 out_dir=out_dir, label=label, log=log)
+        except mt_nav.NavError as e:
+            raise ReleaseError(f"A6-nav: {e}")
+        if timeline is not None:
+            timeline["nav"] = ev
     elif "drag" in step:
         t0 = time.time()
         (x0, y0), (x1, y1) = step["drag"]

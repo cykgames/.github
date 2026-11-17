@@ -105,6 +105,78 @@ class Compiler(unittest.TestCase):
         prog = m.compile_timeline(SINGLE, 1080, 2340, "t")
         self.assertTrue(validate_program_mirror(prog["frames"]))
 
+    def test_equal_hold_byte_identical_legacy(self):
+        # per-contact hold extension must not change equal-hold programs:
+        # single UP group, reverse slot order, hold delay on the first UP.
+        prog = m.compile_timeline(DUAL, 1080, 2340, "t")
+        fr = prog["frames"]
+        ups = [f for f in fr if f["action"] in ("pointer_up", "up")]
+        self.assertEqual(len(ups), 2)
+        self.assertEqual(ups[0]["action"], "pointer_up")
+        self.assertEqual(ups[0]["index"], 1)
+        self.assertEqual(ups[0]["delay_ms"], 1200)
+        self.assertEqual([p["id"] for p in ups[0]["pointers"]], [0, 1])
+        self.assertEqual(ups[1]["action"], "up")
+        self.assertEqual(ups[1]["index"], 0)
+        self.assertEqual(ups[1]["delay_ms"], 0)
+        self.assertEqual([p["id"] for p in ups[1]["pointers"]], [0])
+        self.assertEqual([f["edge_seq"] for f in fr], list(range(len(fr))))
+
+    def test_staggered_higher_slot_first(self):
+        # JUMP: jump hold 200 < move hold 800 -> jump lifts first via
+        # pointer_up index 1, move UP 600ms later.
+        prog = m.compile_timeline(JUMP, 1080, 2340, "t")
+        self.assertTrue(validate_program_mirror(prog["frames"]))
+        ups = [f for f in prog["frames"] if f["action"] in ("pointer_up", "up")]
+        self.assertEqual((ups[0]["action"], ups[0]["index"], ups[0]["delay_ms"]),
+                         ("pointer_up", 1, 200))
+        self.assertEqual((ups[1]["action"], ups[1]["index"], ups[1]["delay_ms"]),
+                         ("up", 0, 600))
+
+    def test_staggered_slot0_first(self):
+        # independent release (L3 row 2): move lifts at 1500 while aim holds
+        # to 3500 -> POINTER_UP at index 0 (non-primary lift, legal), then UP
+        # for the last remaining pointer id 1.
+        r = {"contacts": [
+            {"slot": 0, "role": "move", "path": [[0.14, 0.87], [0.24, 0.8]], "hold": 1500},
+            {"slot": 1, "role": "aim", "path": [[0.85, 0.87], [0.9, 0.75]], "hold": 3500}]}
+        prog = m.compile_timeline(r, 1080, 2340, "t")
+        self.assertTrue(validate_program_mirror(prog["frames"]))
+        ups = [f for f in prog["frames"] if f["action"] in ("pointer_up", "up")]
+        self.assertEqual((ups[0]["action"], ups[0]["index"], ups[0]["delay_ms"]),
+                         ("pointer_up", 0, 1500))
+        self.assertEqual([p["id"] for p in ups[0]["pointers"]], [0, 1])
+        self.assertEqual((ups[1]["action"], ups[1]["index"], ups[1]["delay_ms"]),
+                         ("up", 0, 2000))
+        self.assertEqual([p["id"] for p in ups[1]["pointers"]], [1])
+        # aim keeps its drag coords through the move lift
+        self.assertAlmostEqual(ups[0]["pointers"][1]["x"], 0.9 * 1080, places=3)
+
+    def test_three_staggered_groups(self):
+        r = {"contacts": [
+            {"slot": 0, "role": "move", "path": [[0.1, 0.8]], "hold": 100},
+            {"slot": 1, "role": "aim", "path": [[0.8, 0.8]], "hold": 300},
+            {"slot": 2, "role": "jump", "path": [[0.9, 0.9]], "hold": 200}]}
+        prog = m.compile_timeline(r, 1080, 2340, "t")
+        self.assertTrue(validate_program_mirror(prog["frames"]))
+        ups = [f for f in prog["frames"] if f["action"] in ("pointer_up", "up")]
+        self.assertEqual([(u["action"], u["index"], u["delay_ms"]) for u in ups],
+                         [("pointer_up", 0, 100), ("pointer_up", 1, 100), ("up", 0, 100)])
+        self.assertEqual([p["id"] for p in ups[-1]["pointers"]], [1])
+
+    def test_noncontiguous_slots(self):
+        r = {"contacts": [
+            {"slot": 3, "role": "move", "path": [[0.1, 0.8], [0.2, 0.8]], "hold": 400},
+            {"slot": 7, "role": "aim", "path": [[0.8, 0.8], [0.85, 0.7]], "hold": 400}]}
+        prog = m.compile_timeline(r, 1080, 2340, "t")
+        self.assertTrue(validate_program_mirror(prog["frames"]))
+        self.assertEqual(m.declared_down_ids(prog), [3, 7])
+        ups = [f for f in prog["frames"] if f["action"] in ("pointer_up", "up")]
+        self.assertEqual([p["id"] for p in ups[0]["pointers"]], [3, 7])
+        self.assertAlmostEqual(ups[0]["pointers"][1]["x"], 0.85 * 1080, places=3)
+        self.assertEqual([p["id"] for p in ups[1]["pointers"]], [3])
+        self.assertAlmostEqual(ups[1]["pointers"][0]["x"], 0.2 * 1080, places=3)
+
     def test_dual_legal(self):
         prog = m.compile_timeline(DUAL, 1080, 2340, "t")
         self.assertTrue(validate_program_mirror(prog["frames"]))
