@@ -193,6 +193,7 @@ def expand_atoms(trace):
     Godot touch index (NOT action-index). Each atom carries the injector
     t_before/t_after delivery window + edge_seq/atom_seq for ordering."""
     atoms = []
+    prev_coords = {}
     for ev in trace:
         action = ev["action"]
         ids = ev["ids"]
@@ -205,24 +206,37 @@ def expand_atoms(trace):
                               x=coords[idx][0], y=coords[idx][1], pressed=True,
                               t_before=tb, t_after=ta, edge_seq=edge,
                               atom_seq=ev.get("atom_seq", 0), sequence=ev["sequence"]))
-        elif action == "move":
             for i, sid in enumerate(ids):
-                atoms.append(dict(kind="drag", stable_id=sid,
-                                  x=coords[i][0], y=coords[i][1], pressed=None,
-                                  t_before=tb, t_after=ta, edge_seq=edge,
-                                  atom_seq=i, sequence=ev["sequence"]))
+                prev_coords[sid] = (coords[i][0], coords[i][1])
+        elif action == "move":
+            # Godot emits ScreenDrag only for pointers whose position CHANGED;
+            # a stationary pointer in a multi-pointer MOVE yields no drag
+            # receipt, so no expected drag atom is created for it.
+            atom_i = 0
+            for i, sid in enumerate(ids):
+                cur = (coords[i][0], coords[i][1])
+                prev = prev_coords.get(sid)
+                if prev is None or abs(cur[0] - prev[0]) > 0.01 or abs(cur[1] - prev[1]) > 0.01:
+                    atoms.append(dict(kind="drag", stable_id=sid,
+                                      x=cur[0], y=cur[1], pressed=None,
+                                      t_before=tb, t_after=ta, edge_seq=edge,
+                                      atom_seq=atom_i, sequence=ev["sequence"]))
+                    atom_i += 1
+                prev_coords[sid] = cur
         elif action in ("pointer_up", "up"):
             idx = ev["index"] if action == "pointer_up" else 0
             atoms.append(dict(kind="touch_up", stable_id=ids[idx],
                               x=coords[idx][0], y=coords[idx][1], pressed=False,
                               t_before=tb, t_after=ta, edge_seq=edge,
                               atom_seq=ev.get("atom_seq", 0), sequence=ev["sequence"]))
+            prev_coords.pop(ids[idx], None)
         elif action == "cancel":
             for i, sid in enumerate(ids):
                 atoms.append(dict(kind="touch_up", stable_id=sid,
                                   x=coords[i][0], y=coords[i][1], pressed=False,
                                   t_before=tb, t_after=ta, edge_seq=edge,
                                   atom_seq=i, sequence=ev["sequence"], cleanup=True))
+                prev_coords.pop(sid, None)
     atoms.sort(key=lambda a: (a["edge_seq"], a["atom_seq"]))
     return atoms
 
@@ -293,7 +307,7 @@ def match_atoms(atoms, atom_candidates):
 # --------------------------------------------------------------------------- #
 # arrival -> route -> applied (per-role namespace + ordering + latency)
 # --------------------------------------------------------------------------- #
-def _verify_jump_bridge(route, input_by_seq):
+def _verify_jump_bridge(route, input_by_seq, expected_kind="touch_down"):
     """Host re-verification of the J bridge receipt (never trusts a pre-pasted
     source). native_meta: gui_cyk_seq == src == matched touch arrival seq.
     emulated_adjacency: mouse row device==EMULATION/kind/coords + seq_touch ==
@@ -309,7 +323,7 @@ def _verify_jump_bridge(route, input_by_seq):
         if br.get("gui_cyk_seq") != src:
             return False, "native_meta_seq_mismatch"
         arr = input_by_seq.get(src)
-        if arr is None or arr["k"] != "touch_down":
+        if arr is None or arr["k"] != expected_kind:
             return False, "native_meta_no_touch_arrival"
         return True, "ok"
     if path == "emulated_adjacency":
@@ -320,7 +334,7 @@ def _verify_jump_bridge(route, input_by_seq):
         if src != mouse_seq + 1:
             return False, "emulated_adjacency"
         t = input_by_seq.get(src)
-        if t is None or t["k"] != "touch_down" or t["i"] != 0:
+        if t is None or t["k"] != expected_kind or t["i"] != 0:
             return False, "emulated_touch_match"
         if abs(t["x"] - m["x"]) > COORD_TOL or abs(t["y"] - m["y"]) > COORD_TOL:
             return False, "emulated_coords"
@@ -361,9 +375,24 @@ def match_route_applied(matched, route_entries, apply_entries, jump_entries,
         r = rcands[0]
         used_route.add(r["s"])
         if role == "jump":
-            ok, reason = _verify_jump_bridge(r, input_by_seq)
+            is_release = (a["kind"] == "touch_up")
+            expected_kind = "touch_up" if is_release else "touch_down"
+            ok, reason = _verify_jump_bridge(r, input_by_seq, expected_kind)
             if not ok:
                 failures.append(dict(atom=a, role=role, reason="bridge:" + reason))
+                continue
+            if is_release:
+                # UP release predicate: route-release token (bridge.release) +
+                # ordering; NO jump_log requirement (fresh jump_held=false is
+                # verified host-side from telemetry, not here).
+                if not r.get("bridge", {}).get("release"):
+                    failures.append(dict(atom=a, role=role, reason="release_not_marked"))
+                    continue
+                if not (arr["u"] <= r["u"]):
+                    failures.append(dict(atom=a, role=role, reason="release_order"))
+                    continue
+                links.append(dict(atom=a, arrival=arr, route=r, applied=None,
+                                  role=role, release=True))
                 continue
             jcands = jump_by_src.get(r["src"], [])
             if len(jcands) != 1:

@@ -141,9 +141,11 @@ class Atoms(unittest.TestCase):
     def test_expansion(self):
         atoms = c.expand_atoms(TRACE)
         kinds = [(a["edge_seq"], a["kind"], a["stable_id"]) for a in atoms]
+        # id1 (jump) is stationary in the MOVE -> no drag atom for it (Godot
+        # emits ScreenDrag only for pointers whose position changed).
         self.assertEqual(kinds, [
             (0, "touch_down", 0), (1, "touch_down", 1),
-            (2, "drag", 0), (2, "drag", 1),
+            (2, "drag", 0),
             (3, "touch_up", 1), (4, "touch_up", 0)])
 
     def test_match_healthy(self):
@@ -152,12 +154,12 @@ class Atoms(unittest.TestCase):
         self.assertEqual(len(emu), 2)   # mouse_down + mouse_up
         matched, fails = c.match_atoms(atoms, cand)
         self.assertEqual(fails, [])
-        self.assertEqual(len(matched), 6)
+        self.assertEqual(len(matched), 5)
 
     def test_unmatched_atom(self):
         atoms = c.expand_atoms(TRACE)
         cand, _, _ = c.classify_receipts(INPUT, TRACE)
-        cand = [e for e in cand if not (e["k"] == "drag" and e["i"] == 1)]
+        cand = [e for e in cand if not (e["k"] == "drag" and e["i"] == 0)]
         matched, fails = c.match_atoms(atoms, cand)
         self.assertTrue(any(f["reason"] == "no_receipt" for f in fails))
 
