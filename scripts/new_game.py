@@ -108,6 +108,10 @@ def main():
         git(loc, "remote", "add", "origin", f"https://github.com/{ORG}/{name}.git")
         git(loc, "push", "-u", "origin", "main")
         print("scaffolded + pushed:", loc)
+    disp_title = args.slug.replace("-", " ").title()
+    print(f"display name: when the Godot project exists, set config/name and")
+    print(f"  export_presets.cfg package/name to '{num:03d} {disp_title}'")
+    print(f"  (serial prefix; keep package/unique_name '{args.slug}' stable, no serial)")
     print("next: update the catalog in cykgames/.github profile/README.md")
 
 

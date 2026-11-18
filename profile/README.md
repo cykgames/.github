@@ -100,6 +100,13 @@ nezvers/Godot-GameTemplate (MIT); joystick adapted from 002-obby.
 ## Conventions
 
 - **Repo name**: `NNN-slug` — zero-padded serial + short slug (`001-parkour`, `002-...`)
+- **Display name**: `NNN Title` — the zero-padded serial prefixes the human
+  title everywhere the app is named: the Android launcher label
+  (`export_presets.cfg` `package/name`), Godot `config/name`, and the GitHub
+  release name (`release.py` roster `title`). Padding keeps 100+ apps grouped
+  and in numeric order in the app drawer (`001 Voxel Parkour`, `002 Obby World`,
+  … `100 …`). The package ID (`package/unique_name`) never carries the serial —
+  it stays stable so updates install over existing saves.
 - **Genre**: `runner` / `obby` / `arcade` / `puzzle` / `racing` / `roller` /
   `idle` / `sandbox` / `tower-defense` / `adventure` / `shooter` — parallel dev
   waves assign one distinct genre per agent
